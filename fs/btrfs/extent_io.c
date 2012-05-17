@@ -276,29 +276,36 @@ static void merge_state(struct extent_io_tree *tree,
 	if (state->state & (EXTENT_IOBITS | EXTENT_BOUNDARY))
 		return;
 
-	other_node = rb_prev(&state->rb_node);
-	if (other_node) {
+	while (1) {
+		other_node = rb_prev(&state->rb_node);
+		if (!other_node)
+			break;
 		other = rb_entry(other_node, struct extent_state, rb_node);
-		if (other->end == state->start - 1 &&
-		    other->state == state->state) {
-			merge_cb(tree, state, other);
-			state->start = other->start;
-			other->tree = NULL;
-			rb_erase(&other->rb_node, &tree->state);
-			free_extent_state(other);
-		}
+		if (other->end != state->start - 1 ||
+		    other->state != state->state)
+			break;
+
+		merge_cb(tree, state, other);
+		state->start = other->start;
+		other->tree = NULL;
+		rb_erase(&other->rb_node, &tree->state);
+		free_extent_state(other);
 	}
-	other_node = rb_next(&state->rb_node);
-	if (other_node) {
+
+	while (1) {
+		other_node = rb_next(&state->rb_node);
+		if (!other_node)
+			break;
 		other = rb_entry(other_node, struct extent_state, rb_node);
-		if (other->start == state->end + 1 &&
-		    other->state == state->state) {
-			merge_cb(tree, state, other);
-			state->end = other->end;
-			other->tree = NULL;
-			rb_erase(&other->rb_node, &tree->state);
-			free_extent_state(other);
-		}
+		if (other->start != state->end + 1 ||
+		    other->state != state->state)
+			break;
+
+		merge_cb(tree, state, other);
+		state->end = other->end;
+		other->tree = NULL;
+		rb_erase(&other->rb_node, &tree->state);
+		free_extent_state(other);
 	}
 }
 
