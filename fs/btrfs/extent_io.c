@@ -117,10 +117,12 @@ void extent_io_tree_init(struct extent_io_tree *tree,
 {
 	tree->state = RB_ROOT;
 	INIT_RADIX_TREE(&tree->buffer, GFP_ATOMIC);
+	INIT_RADIX_TREE(&tree->csum, GFP_ATOMIC);
 	tree->ops = NULL;
 	tree->dirty_bytes = 0;
 	spin_lock_init(&tree->lock);
 	spin_lock_init(&tree->buffer_lock);
+	spin_lock_init(&tree->csum_lock);
 	tree->mapping = mapping;
 }
 
@@ -700,15 +702,6 @@ static void cache_state(struct extent_state *state,
 			*cached_ptr = state;
 			atomic_inc(&state->refs);
 		}
-	}
-}
-
-static void uncache_state(struct extent_state **cached_ptr)
-{
-	if (cached_ptr && (*cached_ptr)) {
-		struct extent_state *state = *cached_ptr;
-		*cached_ptr = NULL;
-		free_extent_state(state);
 	}
 }
 
@@ -1666,56 +1659,32 @@ out:
  */
 int set_state_private(struct extent_io_tree *tree, u64 start, u64 private)
 {
-	struct rb_node *node;
-	struct extent_state *state;
 	int ret = 0;
 
-	spin_lock(&tree->lock);
-	/*
-	 * this search will find all the extents that end after
-	 * our range starts.
-	 */
-	node = tree_search(tree, start);
-	if (!node) {
-		ret = -ENOENT;
-		goto out;
-	}
-	state = rb_entry(node, struct extent_state, rb_node);
-	if (state->start != start) {
-		ret = -ENOENT;
-		goto out;
-	}
-	state->private = private;
-out:
-	spin_unlock(&tree->lock);
+	spin_lock(&tree->csum_lock);
+	ret = radix_tree_insert(&tree->csum, (unsigned long)start,
+			       (void *)((unsigned long)private << 1));
+	BUG_ON(ret);
+	spin_unlock(&tree->csum_lock);
 	return ret;
 }
 
 int get_state_private(struct extent_io_tree *tree, u64 start, u64 *private)
 {
-	struct rb_node *node;
-	struct extent_state *state;
-	int ret = 0;
+	void **slot = NULL;
 
-	spin_lock(&tree->lock);
-	/*
-	 * this search will find all the extents that end after
-	 * our range starts.
-	 */
-	node = tree_search(tree, start);
-	if (!node) {
-		ret = -ENOENT;
-		goto out;
+	spin_lock(&tree->csum_lock);
+	slot = radix_tree_lookup_slot(&tree->csum, (unsigned long)start);
+	if (!slot) {
+		spin_unlock(&tree->csum_lock);
+		return -ENOENT;
 	}
-	state = rb_entry(node, struct extent_state, rb_node);
-	if (state->start != start) {
-		ret = -ENOENT;
-		goto out;
-	}
-	*private = state->private;
-out:
-	spin_unlock(&tree->lock);
-	return ret;
+	*private = (u64)(*slot) >> 1;
+
+	radix_tree_delete(&tree->csum, (unsigned long)start);
+	spin_unlock(&tree->csum_lock);
+
+	return 0;
 }
 
 /*
@@ -2294,7 +2263,6 @@ static void end_bio_extent_readpage(struct bio *bio, int err)
 	do {
 		struct page *page = bvec->bv_page;
 		struct extent_state *cached = NULL;
-		struct extent_state *state;
 
 		pr_debug("end_bio_extent_readpage: bi_vcnt=%d, idx=%d, err=%d, "
 			 "mirror=%ld\n", bio->bi_vcnt, bio->bi_idx, err,
@@ -2313,21 +2281,10 @@ static void end_bio_extent_readpage(struct bio *bio, int err)
 		if (++bvec <= bvec_end)
 			prefetchw(&bvec->bv_page->flags);
 
-		spin_lock(&tree->lock);
-		state = find_first_extent_bit_state(tree, start, EXTENT_LOCKED);
-		if (state && state->start == start) {
-			/*
-			 * take a reference on the state, unlock will drop
-			 * the ref
-			 */
-			cache_state(state, &cached);
-		}
-		spin_unlock(&tree->lock);
-
 		mirror = (int)(unsigned long)bio->bi_bdev;
 		if (uptodate && tree->ops && tree->ops->readpage_end_io_hook) {
 			ret = tree->ops->readpage_end_io_hook(page, start, end,
-							      state, mirror);
+							      NULL, mirror);
 			if (ret) {
 				/* no IO indicated but software detected errors
 				 * in the block, either checksum errors or
@@ -2369,7 +2326,6 @@ static void end_bio_extent_readpage(struct bio *bio, int err)
 					test_bit(BIO_UPTODATE, &bio->bi_flags);
 				if (err)
 					uptodate = 0;
-				uncache_state(&cached);
 				continue;
 			}
 		}

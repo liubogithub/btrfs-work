@@ -96,11 +96,13 @@ struct extent_io_ops {
 struct extent_io_tree {
 	struct rb_root state;
 	struct radix_tree_root buffer;
+	struct radix_tree_root csum;
 	struct address_space *mapping;
 	u64 dirty_bytes;
 	int track_uptodate;
 	spinlock_t lock;
 	spinlock_t buffer_lock;
+	spinlock_t csum_lock;
 	struct extent_io_ops *ops;
 };
 

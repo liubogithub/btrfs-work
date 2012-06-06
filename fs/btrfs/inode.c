@@ -2008,12 +2008,7 @@ static int btrfs_readpage_end_io_hook(struct page *page, u64 start, u64 end,
 		return 0;
 	}
 
-	if (state && state->start == start) {
-		private = state->private;
-		ret = 0;
-	} else {
-		ret = get_state_private(io_tree, start, &private);
-	}
+	ret = get_state_private(io_tree, start, &private);
 	kaddr = kmap_atomic(page);
 	if (ret)
 		goto zeroit;
