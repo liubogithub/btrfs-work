@@ -100,7 +100,7 @@ struct extent_io_tree {
 	struct address_space *mapping;
 	u64 dirty_bytes;
 	int track_uptodate;
-	spinlock_t lock;
+	rwlock_t lock;
 	spinlock_t buffer_lock;
 	spinlock_t csum_lock;
 	struct extent_io_ops *ops;
@@ -116,6 +116,7 @@ struct extent_state {
 	wait_queue_head_t wq;
 	atomic_t refs;
 	unsigned long state;
+	spinlock_t lock;
 
 	/* for use by the FS */
 	u64 private;
