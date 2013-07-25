@@ -669,8 +669,13 @@ add_delayed_tree_ref(struct btrfs_fs_info *fs_info,
 	ref->is_head = 0;
 	ref->in_tree = 1;
 
-	if (need_ref_seq(for_cow, ref_root))
-		seq = btrfs_get_tree_mod_seq(fs_info, &trans->delayed_ref_elem);
+	if (need_ref_seq(for_cow, ref_root)) {
+		struct seq_list *elem = NULL;
+
+		if (fs_info->quota_enabled)
+			elem = &trans->delayed_ref_elem;
+		seq = btrfs_get_tree_mod_seq(fs_info, elem);
+	}
 	ref->seq = seq;
 
 	full_ref = btrfs_delayed_node_to_tree_ref(ref);
@@ -731,8 +736,13 @@ add_delayed_data_ref(struct btrfs_fs_info *fs_info,
 	ref->is_head = 0;
 	ref->in_tree = 1;
 
-	if (need_ref_seq(for_cow, ref_root))
-		seq = btrfs_get_tree_mod_seq(fs_info, &trans->delayed_ref_elem);
+	if (need_ref_seq(for_cow, ref_root)) {
+		struct seq_list *elem = NULL;
+
+		if (fs_info->quota_enabled)
+			elem = &trans->delayed_ref_elem;
+		seq = btrfs_get_tree_mod_seq(fs_info, elem);
+	}
 	ref->seq = seq;
 
 	full_ref = btrfs_delayed_node_to_data_ref(ref);

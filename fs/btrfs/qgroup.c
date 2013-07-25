@@ -1186,6 +1186,9 @@ int btrfs_qgroup_record_ref(struct btrfs_trans_handle *trans,
 {
 	struct qgroup_update *u;
 
+	if (!trans->root->fs_info->quota_enabled)
+		return 0;
+
 	BUG_ON(!trans->delayed_ref_elem.seq);
 	u = kmalloc(sizeof(*u), GFP_NOFS);
 	if (!u)
