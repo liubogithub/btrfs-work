@@ -3739,6 +3739,15 @@ int btrfs_csum_one_bio(struct btrfs_root *root, struct inode *inode,
 int btrfs_lookup_csums_range(struct btrfs_root *root, u64 start, u64 end,
 			     struct list_head *list, int search_commit);
 
+int noinline_for_stack
+btrfs_find_dedup_extent(struct btrfs_root *root, struct btrfs_dedup_hash *hash);
+int noinline_for_stack
+btrfs_insert_dedup_extent(struct btrfs_trans_handle *trans,
+			  struct btrfs_root *root,
+			  struct btrfs_dedup_hash *hash);
+int noinline_for_stack
+btrfs_free_dedup_extent(struct btrfs_trans_handle *trans,
+			struct btrfs_root *root, u64 hash, u64 bytenr);
 /* inode.c */
 struct btrfs_delalloc_work {
 	struct inode *inode;
