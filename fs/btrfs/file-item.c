@@ -887,13 +887,15 @@ fail_unlock:
 
 /* 1 means we find one, 0 means we dont. */
 int noinline_for_stack
-btrfs_find_dedup_extent(struct btrfs_root *root, struct btrfs_dedup_hash *hash)
+btrfs_find_dedup_extent(struct btrfs_root *root, struct btrfs_dedup_hash *hash,
+			struct inode *inode, u64 file_pos)
 {
 	struct btrfs_key key;
 	struct btrfs_path *path;
 	struct extent_buffer *leaf;
 	struct btrfs_root *dedup_root;
 	struct btrfs_dedup_item *item;
+	struct btrfs_trans_handle *trans;
 	u64 hash_value;
 	u64 length;
 	u64 dedup_size;
@@ -915,6 +917,12 @@ btrfs_find_dedup_extent(struct btrfs_root *root, struct btrfs_dedup_hash *hash)
 	path = btrfs_alloc_path();
 	if (!path)
 		return 0;
+
+	trans = btrfs_join_transaction(root);
+	if (IS_ERR(trans)) {
+		trans = NULL;
+		goto out;
+	}
 
 	/*
 	 * For SHA256 dedup algorithm, we store the last 64bit as the
@@ -972,8 +980,16 @@ prev_slot:
 	hash->num_bytes = length;
 	hash->compression = compression;
 	found = 1;
+
+	ret = btrfs_inc_extent_ref(trans, root, key.offset, length, 0,
+				   BTRFS_I(inode)->root->root_key.objectid,
+				   btrfs_ino(inode),
+				   file_pos, /* file_pos - 0 */
+				   0);
 out:
 	btrfs_free_path(path);
+	if (trans)
+		btrfs_end_transaction(trans, root);
 	return found;
 }
 
@@ -1055,6 +1071,8 @@ btrfs_free_dedup_extent(struct btrfs_trans_handle *trans,
 	struct btrfs_path *path;
 	struct extent_buffer *leaf;
 	struct btrfs_root *dedup_root;
+	struct btrfs_delayed_ref_root *delayed_refs;
+	struct btrfs_delayed_ref_head *head;
 	int ret = 0;
 
 	if (!root->fs_info->dedup_root)
@@ -1087,6 +1105,22 @@ btrfs_free_dedup_extent(struct btrfs_trans_handle *trans,
 		goto out;
 	if (key.objectid != hash || key.offset != bytenr)
 		goto out;
+
+	ret = 0;
+
+	/* check if ADD_DELAYED delayed refs exist */
+	delayed_refs = &trans->transaction->delayed_refs;
+
+	spin_lock(&delayed_refs->lock);
+	head = btrfs_find_delayed_ref_head(trans, bytenr);
+
+	/* the mutex has been acquired by the caller */
+	if (head && head->add_cnt) {
+		spin_unlock(&delayed_refs->lock);
+		ret = -EAGAIN;
+		goto out;
+	}
+	spin_unlock(&delayed_refs->lock);
 
 	ret = btrfs_del_item(trans, dedup_root, path);
 	WARN_ON(ret);

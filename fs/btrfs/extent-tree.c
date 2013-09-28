@@ -5944,9 +5944,23 @@ again:
 			goto again;
 		}
 	} else {
-		if (!dedup_hash && is_data &&
-		    root_objectid == BTRFS_DEDUP_TREE_OBJECTID)
-			dedup_hash = extent_data_ref_offset(root, path, iref);
+		if (is_data && root_objectid == BTRFS_DEDUP_TREE_OBJECTID) {
+			if (!dedup_hash)
+				dedup_hash = extent_data_ref_offset(root,
+								    path, iref);
+
+			ret = btrfs_free_dedup_extent(trans, root,
+						      dedup_hash, bytenr);
+			if (ret) {
+				if (ret == -EAGAIN)
+					ret = 0;
+				else
+					btrfs_abort_transaction(trans,
+								extent_root,
+								ret);
+				goto out;
+			}
+		}
 
 		if (found_extent) {
 			BUG_ON(is_data && refs_to_drop !=
@@ -5971,20 +5985,9 @@ again:
 		if (is_data) {
 			ret = btrfs_del_csums(trans, root, bytenr, num_bytes);
 			if (ret) {
-				btrfs_abort_transaction(trans, extent_root, ret);
+				btrfs_abort_transaction(trans,
+							extent_root, ret);
 				goto out;
-			}
-
-			if (root_objectid == BTRFS_DEDUP_TREE_OBJECTID) {
-				ret = btrfs_free_dedup_extent(trans, root,
-							      dedup_hash,
-							      bytenr);
-				if (ret) {
-					btrfs_abort_transaction(trans,
-								extent_root,
-								ret);
-					goto out;
-				}
 			}
 		}
 

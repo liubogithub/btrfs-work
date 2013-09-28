@@ -988,7 +988,8 @@ run_delalloc_dedup(struct inode *inode, struct page *locked_page, u64 start,
 			found = 0;
 			compr = BTRFS_COMPRESS_NONE;
 		} else {
-			found = btrfs_find_dedup_extent(root, hash);
+			found = btrfs_find_dedup_extent(root, hash,
+							inode, start);
 			compr = hash->compression;
 		}
 
@@ -2389,13 +2390,6 @@ static int __insert_reserved_file_extent(struct btrfs_trans_handle *trans,
 					   btrfs_ino(inode),
 					   hash->hash[index], 0);
 		}
-	} else {
-		ret = btrfs_inc_extent_ref(trans, root, ins.objectid,
-					   ins.offset, 0,
-					   root->root_key.objectid,
-					   btrfs_ino(inode),
-					   file_pos, /* file_pos - 0 */
-					   0);
 	}
 out:
 	btrfs_free_path(path);

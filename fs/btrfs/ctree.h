@@ -3743,7 +3743,8 @@ int btrfs_lookup_csums_range(struct btrfs_root *root, u64 start, u64 end,
 			     struct list_head *list, int search_commit);
 
 int noinline_for_stack
-btrfs_find_dedup_extent(struct btrfs_root *root, struct btrfs_dedup_hash *hash);
+btrfs_find_dedup_extent(struct btrfs_root *root, struct btrfs_dedup_hash *hash,
+			struct inode *inode, u64 file_pos);
 int noinline_for_stack
 btrfs_insert_dedup_extent(struct btrfs_trans_handle *trans,
 			  struct btrfs_root *root,
