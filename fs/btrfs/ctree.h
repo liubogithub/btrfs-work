@@ -33,6 +33,7 @@
 #include <asm/kmap_types.h>
 #include <linux/pagemap.h>
 #include <linux/btrfs.h>
+#include <crypto/hash.h>
 #include "extent_io.h"
 #include "extent_map.h"
 #include "async-thread.h"
@@ -100,6 +101,9 @@ struct btrfs_ordered_sum;
 
 /* for storing items that use the BTRFS_UUID_KEY* types */
 #define BTRFS_UUID_TREE_OBJECTID 9ULL
+
+/* dedup tree(experimental) */
+#define BTRFS_DEDUP_TREE_OBJECTID 10ULL
 
 /* for storing balance parameters in the root tree */
 #define BTRFS_BALANCE_OBJECTID -4ULL
@@ -522,6 +526,7 @@ struct btrfs_super_block {
 #define BTRFS_FEATURE_INCOMPAT_RAID56		(1ULL << 7)
 #define BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA	(1ULL << 8)
 #define BTRFS_FEATURE_INCOMPAT_NO_HOLES		(1ULL << 9)
+#define BTRFS_FEATURE_INCOMPAT_DEDUP		(1ULL << 10)
 
 #define BTRFS_FEATURE_COMPAT_SUPP		0ULL
 #define BTRFS_FEATURE_COMPAT_SAFE_SET		0ULL
@@ -539,6 +544,7 @@ struct btrfs_super_block {
 	 BTRFS_FEATURE_INCOMPAT_RAID56 |		\
 	 BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF |		\
 	 BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA |	\
+	 BTRFS_FEATURE_INCOMPAT_DEDUP |			\
 	 BTRFS_FEATURE_INCOMPAT_NO_HOLES)
 
 #define BTRFS_FEATURE_INCOMPAT_SAFE_SET			\
@@ -913,6 +919,51 @@ struct btrfs_file_extent_item {
 struct btrfs_csum_item {
 	u8 csum;
 } __attribute__ ((__packed__));
+
+/* dedup */
+enum btrfs_dedup_type {
+	BTRFS_DEDUP_SHA256 = 0,
+	BTRFS_DEDUP_LAST = 1,
+};
+
+static int btrfs_dedup_lens[] = { 4, 0 };
+static int btrfs_dedup_sizes[] = { 32, 0 };	/* 256bit, 32bytes */
+
+struct btrfs_dedup_item {
+	/* disk length of dedup range */
+	__le64 len;
+
+	u8 type;
+	u8 compression;
+	u8 encryption;
+
+	/* spare for later use */
+	__le16 other_encoding;
+
+	/* hash/fingerprints go here */
+} __attribute__ ((__packed__));
+
+struct btrfs_dedup_hash {
+	u64 bytenr;
+	u64 num_bytes;
+
+	/* hash algorithm */
+	int type;
+
+	int compression;
+
+	/* last field is a variable length array of dedup hash */
+	u64 hash[];
+};
+
+static inline int btrfs_dedup_hash_size(int type)
+{
+	WARN_ON((btrfs_dedup_lens[type] * sizeof(u64)) !=
+		 btrfs_dedup_sizes[type]);
+
+	return sizeof(struct btrfs_dedup_hash) + btrfs_dedup_sizes[type];
+}
+
 
 struct btrfs_dev_stats_item {
 	/*
@@ -1319,6 +1370,7 @@ struct btrfs_fs_info {
 	struct btrfs_root *dev_root;
 	struct btrfs_root *fs_root;
 	struct btrfs_root *csum_root;
+	struct btrfs_root *dedup_root;
 	struct btrfs_root *quota_root;
 	struct btrfs_root *uuid_root;
 
@@ -1676,6 +1728,14 @@ struct btrfs_fs_info {
 
 	struct semaphore uuid_tree_rescan_sem;
 	unsigned int update_uuid_tree_gen:1;
+
+	/* reference to deduplication algorithm driver via cryptoapi */
+	struct crypto_shash *dedup_driver;
+
+	/* dedup blocksize */
+	u64 dedup_bs;
+
+	int dedup_type;
 };
 
 /*
@@ -1994,6 +2054,8 @@ struct btrfs_ioctl_defrag_range_args {
  * data in the FS
  */
 #define BTRFS_STRING_ITEM_KEY	253
+
+#define BTRFS_DEDUP_ITEM_KEY	254
 
 /*
  * Flags for mount options.
@@ -3029,6 +3091,14 @@ static inline u32 btrfs_file_extent_inline_len(struct extent_buffer *eb,
 }
 
 
+/* btrfs_dedup_item */
+BTRFS_SETGET_FUNCS(dedup_len, struct btrfs_dedup_item, len, 64);
+BTRFS_SETGET_FUNCS(dedup_compression, struct btrfs_dedup_item, compression, 8);
+BTRFS_SETGET_FUNCS(dedup_encryption, struct btrfs_dedup_item, encryption, 8);
+BTRFS_SETGET_FUNCS(dedup_other_encoding, struct btrfs_dedup_item,
+		   other_encoding, 16);
+BTRFS_SETGET_FUNCS(dedup_type, struct btrfs_dedup_item, type, 8);
+
 /* btrfs_dev_stats_item */
 static inline u64 btrfs_dev_stats_value(struct extent_buffer *eb,
 					struct btrfs_dev_stats_item *ptr,
@@ -3500,6 +3570,8 @@ static inline int btrfs_need_cleaner_sleep(struct btrfs_root *root)
 
 static inline void free_fs_info(struct btrfs_fs_info *fs_info)
 {
+	if (fs_info->dedup_driver)
+		crypto_free_shash(fs_info->dedup_driver);
 	kfree(fs_info->balance_ctl);
 	kfree(fs_info->delayed_root);
 	kfree(fs_info->extent_root);
@@ -3666,6 +3738,7 @@ int btrfs_csum_one_bio(struct btrfs_root *root, struct inode *inode,
 		       struct bio *bio, u64 file_start, int contig);
 int btrfs_lookup_csums_range(struct btrfs_root *root, u64 start, u64 end,
 			     struct list_head *list, int search_commit);
+
 /* inode.c */
 struct btrfs_delalloc_work {
 	struct inode *inode;
