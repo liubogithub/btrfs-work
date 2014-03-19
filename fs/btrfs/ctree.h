@@ -1736,6 +1736,9 @@ struct btrfs_fs_info {
 	u64 dedup_bs;
 
 	int dedup_type;
+
+	/* protect user change for dedup operations */
+	struct mutex dedup_ioctl_mutex;
 };
 
 /*
