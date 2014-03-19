@@ -1123,8 +1123,16 @@ static noinline int lookup_extent_data_ref(struct btrfs_trans_handle *trans,
 		key.offset = parent;
 	} else {
 		key.type = BTRFS_EXTENT_DATA_REF_KEY;
-		key.offset = hash_extent_data_ref(root_objectid,
-						  owner, offset);
+
+		/*
+		 * we've not got the right offset and owner, so search by -1
+		 * here.
+		 */
+		if (root_objectid == BTRFS_DEDUP_TREE_OBJECTID)
+			key.offset = (u64)-1;
+		else
+			key.offset = hash_extent_data_ref(root_objectid,
+							  owner, offset);
 	}
 again:
 	recow = 0;
@@ -1151,6 +1159,10 @@ again:
 		goto fail;
 	}
 
+	if (ret > 0 && root_objectid == BTRFS_DEDUP_TREE_OBJECTID &&
+	    path->slots[0] > 0)
+		path->slots[0]--;
+
 	leaf = path->nodes[0];
 	nritems = btrfs_header_nritems(leaf);
 	while (1) {
@@ -1174,14 +1186,22 @@ again:
 		ref = btrfs_item_ptr(leaf, path->slots[0],
 				     struct btrfs_extent_data_ref);
 
-		if (match_extent_data_ref(leaf, ref, root_objectid,
-					  owner, offset)) {
-			if (recow) {
-				btrfs_release_path(path);
-				goto again;
+		if (root_objectid == BTRFS_DEDUP_TREE_OBJECTID) {
+			if (btrfs_extent_data_ref_root(leaf, ref) ==
+			    root_objectid) {
+				err = 0;
+				break;
 			}
-			err = 0;
-			break;
+		} else {
+			if (match_extent_data_ref(leaf, ref, root_objectid,
+						  owner, offset)) {
+				if (recow) {
+					btrfs_release_path(path);
+					goto again;
+				}
+				err = 0;
+				break;
+			}
 		}
 		path->slots[0]++;
 	}
@@ -1323,6 +1343,32 @@ static noinline int remove_extent_data_ref(struct btrfs_trans_handle *trans,
 		btrfs_mark_buffer_dirty(leaf);
 	}
 	return ret;
+}
+
+static noinline u64 extent_data_ref_offset(struct btrfs_root *root,
+					  struct btrfs_path *path,
+					  struct btrfs_extent_inline_ref *iref)
+{
+	struct btrfs_key key;
+	struct extent_buffer *leaf;
+	struct btrfs_extent_data_ref *ref1;
+	u64 offset = 0;
+
+	leaf = path->nodes[0];
+	btrfs_item_key_to_cpu(leaf, &key, path->slots[0]);
+	if (iref) {
+		WARN_ON(btrfs_extent_inline_ref_type(leaf, iref) !=
+			BTRFS_EXTENT_DATA_REF_KEY);
+		ref1 = (struct btrfs_extent_data_ref *)(&iref->offset);
+		offset = btrfs_extent_data_ref_offset(leaf, ref1);
+	} else if (key.type == BTRFS_EXTENT_DATA_REF_KEY) {
+		ref1 = btrfs_item_ptr(leaf, path->slots[0],
+				      struct btrfs_extent_data_ref);
+		offset = btrfs_extent_data_ref_offset(leaf, ref1);
+	} else {
+		WARN_ON(1);
+	}
+	return offset;
 }
 
 static noinline u32 extent_data_ref_count(struct btrfs_root *root,
@@ -1591,7 +1637,8 @@ again:
 	err = -ENOENT;
 	while (1) {
 		if (ptr >= end) {
-			WARN_ON(ptr > end);
+			WARN_ON(ptr > end &&
+				root_objectid != BTRFS_DEDUP_TREE_OBJECTID);
 			break;
 		}
 		iref = (struct btrfs_extent_inline_ref *)ptr;
@@ -1606,14 +1653,25 @@ again:
 		if (type == BTRFS_EXTENT_DATA_REF_KEY) {
 			struct btrfs_extent_data_ref *dref;
 			dref = (struct btrfs_extent_data_ref *)(&iref->offset);
-			if (match_extent_data_ref(leaf, dref, root_objectid,
-						  owner, offset)) {
-				err = 0;
-				break;
+
+			if (root_objectid == BTRFS_DEDUP_TREE_OBJECTID) {
+				if (btrfs_extent_data_ref_root(leaf, dref) ==
+				    root_objectid) {
+					err = 0;
+					break;
+				}
+			} else {
+				if (match_extent_data_ref(leaf, dref,
+							  root_objectid, owner,
+							  offset)) {
+					err = 0;
+					break;
+				}
+				if (hash_extent_data_ref_item(leaf, dref) <
+				    hash_extent_data_ref(root_objectid, owner,
+							 offset))
+					break;
 			}
-			if (hash_extent_data_ref_item(leaf, dref) <
-			    hash_extent_data_ref(root_objectid, owner, offset))
-				break;
 		} else {
 			u64 ref_offset;
 			ref_offset = btrfs_extent_inline_ref_offset(leaf, iref);
@@ -5637,17 +5695,26 @@ static int __btrfs_free_extent(struct btrfs_trans_handle *trans,
 	struct btrfs_extent_inline_ref *iref;
 	int ret;
 	int is_data;
-	int extent_slot = 0;
-	int found_extent = 0;
-	int num_to_del = 1;
+	int extent_slot;
+	int found_extent;
+	int num_to_del;
 	u32 item_size;
 	u64 refs;
+	u64 orig_root_obj;
+	u64 dedup_hash;
 	bool skinny_metadata = btrfs_fs_incompat(root->fs_info,
 						 SKINNY_METADATA);
 
 	path = btrfs_alloc_path();
 	if (!path)
 		return -ENOMEM;
+
+again:
+	extent_slot = 0;
+	found_extent = 0;
+	num_to_del = 1;
+	orig_root_obj = root_objectid;
+	dedup_hash = 0;
 
 	path->reada = 1;
 	path->leave_spinning = 1;
@@ -5690,6 +5757,12 @@ static int __btrfs_free_extent(struct btrfs_trans_handle *trans,
 #endif
 		if (!found_extent) {
 			BUG_ON(iref);
+
+			if (is_data &&
+			    root_objectid == BTRFS_DEDUP_TREE_OBJECTID) {
+				dedup_hash = extent_data_ref_offset(root, path,
+								    NULL);
+			}
 			ret = remove_extent_backref(trans, extent_root, path,
 						    NULL, refs_to_drop,
 						    is_data);
@@ -5747,6 +5820,10 @@ static int __btrfs_free_extent(struct btrfs_trans_handle *trans,
 			}
 			extent_slot = path->slots[0];
 		}
+	} else if (ret == -ENOENT &&
+		   root_objectid == BTRFS_DEDUP_TREE_OBJECTID) {
+		ret = 0;
+		goto out;
 	} else if (WARN_ON(ret == -ENOENT)) {
 		btrfs_print_leaf(extent_root, path->nodes[0]);
 		btrfs_err(info,
@@ -5839,7 +5916,28 @@ static int __btrfs_free_extent(struct btrfs_trans_handle *trans,
 		}
 		add_pinned_bytes(root->fs_info, -num_bytes, owner_objectid,
 				 root_objectid);
+
+		/*
+		 * special case for dedup
+		 *
+		 * We assume the last ref(ref==1) is backref pointing to dedup.
+		 *
+		 * root_obj == 1 means that it's a free space cache inode,
+		 * and it always uses PREALLOC, so it never has dedup extent.
+		 */
+		if (is_data && refs == 1 &&
+		    orig_root_obj != BTRFS_ROOT_TREE_OBJECTID) {
+			btrfs_release_path(path);
+			root_objectid = BTRFS_DEDUP_TREE_OBJECTID;
+			parent = 0;
+
+			goto again;
+		}
 	} else {
+		if (!dedup_hash && is_data &&
+		    root_objectid == BTRFS_DEDUP_TREE_OBJECTID)
+			dedup_hash = extent_data_ref_offset(root, path, iref);
+
 		if (found_extent) {
 			BUG_ON(is_data && refs_to_drop !=
 			       extent_data_ref_count(root, path, iref));
@@ -5865,6 +5963,18 @@ static int __btrfs_free_extent(struct btrfs_trans_handle *trans,
 			if (ret) {
 				btrfs_abort_transaction(trans, extent_root, ret);
 				goto out;
+			}
+
+			if (root_objectid == BTRFS_DEDUP_TREE_OBJECTID) {
+				ret = btrfs_free_dedup_extent(trans, root,
+							      dedup_hash,
+							      bytenr);
+				if (ret) {
+					btrfs_abort_transaction(trans,
+								extent_root,
+								ret);
+					goto out;
+				}
 			}
 		}
 
