@@ -5727,7 +5727,6 @@ again:
 	dedup_hash = 0;
 
 	path->reada = 1;
-	path->leave_spinning = 1;
 
 	is_data = owner_objectid >= BTRFS_FIRST_FREE_OBJECTID;
 	BUG_ON(!is_data && refs_to_drop != 1);
@@ -5781,7 +5780,6 @@ again:
 				goto out;
 			}
 			btrfs_release_path(path);
-			path->leave_spinning = 1;
 
 			key.objectid = bytenr;
 			key.type = BTRFS_EXTENT_ITEM_KEY;
@@ -5949,6 +5947,7 @@ again:
 				dedup_hash = extent_data_ref_offset(root,
 								    path, iref);
 
+			WARN_ON_ONCE(path->leave_spinning);
 			ret = btrfs_free_dedup_extent(trans, root,
 						      dedup_hash, bytenr);
 			if (ret) {
