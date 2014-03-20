@@ -551,6 +551,9 @@ update_existing_head_ref(struct btrfs_delayed_ref_node *existing,
 	 */
 	spin_lock(&existing_ref->lock);
 	existing->ref_mod += update->ref_mod;
+	WARN_ON(update->ref_mod > 1);
+	if (update->ref_mod == 1)
+		existing_ref->add_cnt++;
 	spin_unlock(&existing_ref->lock);
 }
 
@@ -614,6 +617,11 @@ add_delayed_ref_head(struct btrfs_fs_info *fs_info,
 	head_ref->is_data = is_data;
 	head_ref->ref_root = RB_ROOT;
 	head_ref->processing = 0;
+	/* track added ref, more comments in select_delayed_ref() */
+	if (count_mod == 1)
+		head_ref->add_cnt = 1;
+	else
+		head_ref->add_cnt = 0;
 
 	spin_lock_init(&head_ref->lock);
 	mutex_init(&head_ref->mutex);

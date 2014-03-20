@@ -2347,7 +2347,11 @@ static noinline struct btrfs_delayed_ref_node *
 select_delayed_ref(struct btrfs_delayed_ref_head *head)
 {
 	struct rb_node *node;
-	struct btrfs_delayed_ref_node *ref, *last = NULL;;
+	struct btrfs_delayed_ref_node *ref, *last = NULL;
+	int action = BTRFS_ADD_DELAYED_REF;
+
+	if (head->add_cnt == 0)
+		action = BTRFS_DROP_DELAYED_REF;
 
 	/*
 	 * select delayed ref of type BTRFS_ADD_DELAYED_REF first.
@@ -2358,10 +2362,13 @@ select_delayed_ref(struct btrfs_delayed_ref_head *head)
 	while (node) {
 		ref = rb_entry(node, struct btrfs_delayed_ref_node,
 				rb_node);
-		if (ref->action == BTRFS_ADD_DELAYED_REF)
+		if (ref->action == action) {
+			if (ref->action == BTRFS_ADD_DELAYED_REF)
+				head->add_cnt--;
 			return ref;
-		else if (last == NULL)
+		} else if (last == NULL) {
 			last = ref;
+		}
 		node = rb_next(node);
 	}
 	return last;
@@ -2435,6 +2442,9 @@ static noinline int __btrfs_run_delayed_refs(struct btrfs_trans_handle *trans,
 
 		if (ref && ref->seq &&
 		    btrfs_check_delayed_seq(fs_info, delayed_refs, ref->seq)) {
+			if (ref->action == BTRFS_ADD_DELAYED_REF)
+				locked_ref->add_cnt++;
+
 			spin_unlock(&locked_ref->lock);
 			btrfs_delayed_ref_unlock(locked_ref);
 			spin_lock(&delayed_refs->lock);
