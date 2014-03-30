@@ -215,6 +215,7 @@ loop:
 	cur_trans->transid = fs_info->generation;
 	fs_info->running_transaction = cur_trans;
 	cur_trans->aborted = 0;
+	cur_trans->blocked = 1;
 	spin_unlock(&fs_info->trans_lock);
 
 	return 0;
@@ -329,6 +330,27 @@ static void wait_current_trans(struct btrfs_root *root)
 		wait_event(root->fs_info->transaction_wait,
 			   cur_trans->state >= TRANS_STATE_UNBLOCKED ||
 			   cur_trans->aborted);
+
+		btrfs_put_transaction(cur_trans);
+	} else {
+		spin_unlock(&root->fs_info->trans_lock);
+	}
+}
+
+static noinline void wait_current_trans_for_commit(struct btrfs_root *root)
+{
+	struct btrfs_transaction *cur_trans;
+
+	spin_lock(&root->fs_info->trans_lock);
+	cur_trans = root->fs_info->running_transaction;
+	if (cur_trans && is_transaction_blocked(cur_trans)) {
+		atomic_inc(&cur_trans->use_count);
+		spin_unlock(&root->fs_info->trans_lock);
+
+		wait_event(cur_trans->commit_wait,
+			   cur_trans->state >= TRANS_STATE_COMPLETED ||
+			   cur_trans->aborted || cur_trans->blocked == 0);
+
 		btrfs_put_transaction(cur_trans);
 	} else {
 		spin_unlock(&root->fs_info->trans_lock);
@@ -435,6 +457,25 @@ again:
 
 	if (may_wait_transaction(root, type))
 		wait_current_trans(root);
+
+	/*
+	 * In the case of dedupe, we need to throttle delayed refs at the
+	 * very start stage, otherwise we'd run into ENOSPC because more
+	 * delayed refs are added while processing delayed refs.
+	 */
+	if (root->fs_info->dedup_bs > 0 && type == TRANS_JOIN &&
+	    btrfs_check_space_for_delayed_refs(NULL, root)) {
+		struct btrfs_transaction *cur_trans;
+
+		spin_lock(&root->fs_info->trans_lock);
+		cur_trans = root->fs_info->running_transaction;
+		if (cur_trans && cur_trans->state == TRANS_STATE_RUNNING)
+			cur_trans->state = TRANS_STATE_BLOCKED;
+		spin_unlock(&root->fs_info->trans_lock);
+
+		wake_up_process(root->fs_info->transaction_kthread);
+		wait_current_trans_for_commit(root);
+	}
 
 	do {
 		ret = join_transaction(root, type);

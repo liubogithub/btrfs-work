@@ -59,6 +59,7 @@ struct btrfs_transaction {
 	struct list_head pending_chunks;
 	struct btrfs_delayed_ref_root delayed_refs;
 	int aborted;
+	int blocked;
 };
 
 #define __TRANS_FREEZABLE	(1U << 0)

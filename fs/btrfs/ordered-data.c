@@ -747,6 +747,12 @@ int btrfs_run_ordered_operations(struct btrfs_trans_handle *trans,
 				      &cur_trans->ordered_operations);
 		spin_unlock(&root->fs_info->ordered_root_lock);
 
+		if (cur_trans->blocked) {
+			cur_trans->blocked = 0;
+			if (waitqueue_active(&cur_trans->commit_wait))
+				wake_up(&cur_trans->commit_wait);
+		}
+
 		work = btrfs_alloc_delalloc_work(inode, wait, 1);
 		if (!work) {
 			spin_lock(&root->fs_info->ordered_root_lock);
