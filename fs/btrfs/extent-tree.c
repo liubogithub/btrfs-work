@@ -5922,9 +5922,6 @@ again:
 				goto out;
 			}
 		}
-		add_pinned_bytes(root->fs_info, -num_bytes, owner_objectid,
-				 root_objectid);
-
 		/*
 		 * special case for dedup
 		 *
@@ -5941,6 +5938,9 @@ again:
 			refs_to_drop = 1;
 
 			goto again;
+		} else {
+			add_pinned_bytes(root->fs_info, -num_bytes,
+					 owner_objectid, root_objectid);
 		}
 	} else {
 		if (is_data && root_objectid == BTRFS_DEDUP_TREE_OBJECTID) {
