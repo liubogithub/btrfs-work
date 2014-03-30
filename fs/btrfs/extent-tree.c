@@ -5938,6 +5938,7 @@ again:
 			btrfs_release_path(path);
 			root_objectid = BTRFS_DEDUP_TREE_OBJECTID;
 			parent = 0;
+			refs_to_drop = 1;
 
 			goto again;
 		}
