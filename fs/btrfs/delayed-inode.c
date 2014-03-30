@@ -649,7 +649,7 @@ static int btrfs_delayed_inode_reserve_metadata(
 			goto out;
 
 		ret = btrfs_block_rsv_migrate(src_rsv, dst_rsv, num_bytes);
-		if (!WARN_ON(ret))
+		if (!WARN_ON_ONCE(ret))
 			goto out;
 
 		/*
