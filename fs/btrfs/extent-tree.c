@@ -4726,14 +4726,14 @@ static u64 calc_global_metadata_size(struct btrfs_fs_info *fs_info)
 
 	sinfo = __find_space_info(fs_info, BTRFS_BLOCK_GROUP_DATA);
 	spin_lock(&sinfo->lock);
-	data_used = sinfo->bytes_used;
+	data_used = sinfo->total_bytes;
 	spin_unlock(&sinfo->lock);
 
 	sinfo = __find_space_info(fs_info, BTRFS_BLOCK_GROUP_METADATA);
 	spin_lock(&sinfo->lock);
 	if (sinfo->flags & BTRFS_BLOCK_GROUP_DATA)
 		data_used = 0;
-	meta_used = sinfo->bytes_used;
+	meta_used = sinfo->total_bytes;
 	spin_unlock(&sinfo->lock);
 
 	num_bytes = (data_used >> fs_info->sb->s_blocksize_bits) *
