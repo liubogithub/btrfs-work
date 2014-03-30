@@ -2695,24 +2695,51 @@ static inline u64 heads_to_leaves(struct btrfs_root *root, u64 heads)
 int btrfs_check_space_for_delayed_refs(struct btrfs_trans_handle *trans,
 				       struct btrfs_root *root)
 {
+	struct btrfs_delayed_ref_root *delayed_refs;
 	struct btrfs_block_rsv *global_rsv;
-	u64 num_heads = trans->transaction->delayed_refs.num_heads_ready;
+	u64 num_heads;
+	u64 num_entries;
 	u64 num_bytes;
 	int ret = 0;
 
-	num_bytes = btrfs_calc_trans_metadata_size(root, 1);
-	num_heads = heads_to_leaves(root, num_heads);
-	if (num_heads > 1)
-		num_bytes += (num_heads - 1) * root->leafsize;
-	num_bytes <<= 1;
 	global_rsv = &root->fs_info->global_block_rsv;
 
-	/*
-	 * If we can't allocate any more chunks lets make sure we have _lots_ of
-	 * wiggle room since running delayed refs can create more delayed refs.
-	 */
-	if (global_rsv->space_info->full)
+	if (trans) {
+		num_heads = trans->transaction->delayed_refs.num_heads_ready;
+		num_bytes = btrfs_calc_trans_metadata_size(root, 1);
+		num_heads = heads_to_leaves(root, num_heads);
+		if (num_heads > 1)
+			num_bytes += (num_heads - 1) * root->leafsize;
 		num_bytes <<= 1;
+		/*
+		 * If we can't allocate any more chunks lets make sure we have _lots_ of
+		 * wiggle room since running delayed refs can create more delayed refs.
+		 */
+		if (global_rsv->space_info->full)
+			num_bytes <<= 1;
+	} else {
+		if (root->fs_info->dedup_bs == 0)
+			return 0;
+
+		/* dedup enabled */
+		spin_lock(&root->fs_info->trans_lock);
+		if (!root->fs_info->running_transaction) {
+			spin_unlock(&root->fs_info->trans_lock);
+			return 0;
+		}
+
+		delayed_refs =
+			 &root->fs_info->running_transaction->delayed_refs;
+
+		num_entries = atomic_read(&delayed_refs->num_entries);
+		num_heads = delayed_refs->num_heads;
+
+		spin_unlock(&root->fs_info->trans_lock);
+
+		/* The worst case */
+		num_bytes = (num_entries - num_heads) *
+					btrfs_calc_trans_metadata_size(root, 1);
+	}
 
 	spin_lock(&global_rsv->lock);
 	if (global_rsv->reserved <= num_bytes)

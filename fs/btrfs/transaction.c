@@ -316,23 +316,43 @@ static inline int is_transaction_blocked(struct btrfs_transaction *trans)
  * when this is done, it is safe to start a new transaction, but the current
  * transaction might not be fully on disk.
  */
-static void wait_current_trans(struct btrfs_root *root)
+static void __wait_current_trans(struct btrfs_root *root, int state)
 {
 	struct btrfs_transaction *cur_trans;
+	wait_queue_head_t *wq = NULL;
 
 	spin_lock(&root->fs_info->trans_lock);
 	cur_trans = root->fs_info->running_transaction;
 	if (cur_trans && is_transaction_blocked(cur_trans)) {
-		atomic_inc(&cur_trans->use_count);
-		spin_unlock(&root->fs_info->trans_lock);
+		if (state == TRANS_STATE_UNBLOCKED)
+			wq = &root->fs_info->transaction_wait;
+		else if (state == TRANS_STATE_COMPLETED)
+			wq = &cur_trans->commit_wait;
 
-		wait_event(root->fs_info->transaction_wait,
-			   cur_trans->state >= TRANS_STATE_UNBLOCKED ||
-			   cur_trans->aborted);
-		btrfs_put_transaction(cur_trans);
+		if (wq) {
+			atomic_inc(&cur_trans->use_count);
+			spin_unlock(&root->fs_info->trans_lock);
+
+			wait_event((*wq),
+				   cur_trans->state >= state || cur_trans->aborted);
+
+			btrfs_put_transaction(cur_trans);
+		} else {
+			spin_unlock(&root->fs_info->trans_lock);
+		}
 	} else {
 		spin_unlock(&root->fs_info->trans_lock);
 	}
+}
+
+static void wait_current_trans(struct btrfs_root *root)
+{
+	__wait_current_trans(root, TRANS_STATE_UNBLOCKED);
+}
+
+static void wait_current_trans_for_commit(struct btrfs_root *root)
+{
+	__wait_current_trans(root, TRANS_STATE_COMPLETED);
 }
 
 static int may_wait_transaction(struct btrfs_root *root, int type)
@@ -435,6 +455,25 @@ again:
 
 	if (may_wait_transaction(root, type))
 		wait_current_trans(root);
+
+	/*
+	 * In the case of dedupe, we need to throttle delayed refs at the
+	 * very start stage, otherwise we'd run into ENOSPC because of more
+	 * delayed refs involved .
+	 */
+	if (root->fs_info->dedup_bs > 0 && type == TRANS_JOIN &&
+	    btrfs_check_space_for_delayed_refs(NULL, root)) {
+		struct btrfs_transaction *cur_trans;
+
+		spin_lock(&root->fs_info->trans_lock);
+		cur_trans = root->fs_info->running_transaction;
+		if (cur_trans && cur_trans->state == TRANS_STATE_RUNNING)
+			cur_trans->state = TRANS_STATE_BLOCKED;
+		spin_unlock(&root->fs_info->trans_lock);
+
+		wake_up_process(root->fs_info->transaction_kthread);
+		wait_current_trans_for_commit(root);
+	}
 
 	do {
 		ret = join_transaction(root, type);
