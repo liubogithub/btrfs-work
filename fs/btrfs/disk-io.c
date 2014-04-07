@@ -153,6 +153,7 @@ static struct btrfs_lockdep_keyset {
 	{ .id = BTRFS_FS_TREE_OBJECTID,		.name_stem = "fs"	},
 	{ .id = BTRFS_CSUM_TREE_OBJECTID,	.name_stem = "csum"	},
 	{ .id = BTRFS_QUOTA_TREE_OBJECTID,	.name_stem = "quota"	},
+	{ .id = BTRFS_DEDUP_TREE_OBJECTID,	.name_stem = "dedup"	},
 	{ .id = BTRFS_TREE_LOG_OBJECTID,	.name_stem = "log"	},
 	{ .id = BTRFS_TREE_RELOC_OBJECTID,	.name_stem = "treloc"	},
 	{ .id = BTRFS_DATA_RELOC_TREE_OBJECTID,	.name_stem = "dreloc"	},
@@ -1619,6 +1620,9 @@ struct btrfs_root *btrfs_get_fs_root(struct btrfs_fs_info *fs_info,
 	if (location->objectid == BTRFS_UUID_TREE_OBJECTID)
 		return fs_info->uuid_root ? fs_info->uuid_root :
 					    ERR_PTR(-ENOENT);
+	if (location->objectid == BTRFS_DEDUP_TREE_OBJECTID)
+		return fs_info->dedup_root ? fs_info->dedup_root :
+					     ERR_PTR(-ENOENT);
 again:
 	root = btrfs_lookup_fs_root(fs_info, location->objectid);
 	if (root) {
@@ -2069,6 +2073,7 @@ static void free_root_pointers(struct btrfs_fs_info *info, int chunk_root)
 	free_root_extent_buffers(info->csum_root);
 	free_root_extent_buffers(info->quota_root);
 	free_root_extent_buffers(info->uuid_root);
+	free_root_extent_buffers(info->dedup_root);
 	if (chunk_root)
 		free_root_extent_buffers(info->chunk_root);
 }
@@ -2110,6 +2115,19 @@ static void del_fs_roots(struct btrfs_fs_info *fs_info)
 	}
 }
 
+static struct crypto_shash *
+btrfs_build_dedup_driver(struct btrfs_fs_info *info)
+{
+	switch (info->dedup_type) {
+	case BTRFS_DEDUP_SHA256:
+		return crypto_alloc_shash("sha256", 0, 0);
+	default:
+		pr_err("btrfs: unrecognized dedup type\n");
+		break;
+	}
+	return ERR_PTR(-EINVAL);
+}
+
 int open_ctree(struct super_block *sb,
 	       struct btrfs_fs_devices *fs_devices,
 	       char *options)
@@ -2132,6 +2150,7 @@ int open_ctree(struct super_block *sb,
 	struct btrfs_root *dev_root;
 	struct btrfs_root *quota_root;
 	struct btrfs_root *uuid_root;
+	struct btrfs_root *dedup_root;
 	struct btrfs_root *log_tree_root;
 	int ret;
 	int err = -EINVAL;
@@ -2232,6 +2251,8 @@ int open_ctree(struct super_block *sb,
 	atomic64_set(&fs_info->tree_mod_seq, 0);
 	fs_info->sb = sb;
 	fs_info->max_inline = 8192 * 1024;
+	fs_info->dedup_bs = 0;
+	fs_info->dedup_type = BTRFS_DEDUP_SHA256;
 	fs_info->metadata_ratio = 0;
 	fs_info->defrag_inodes = RB_ROOT;
 	fs_info->free_chunk_space = 0;
@@ -2315,6 +2336,14 @@ int open_ctree(struct super_block *sb,
 			     fs_info->btree_inode->i_mapping);
 	fs_info->pinned_extents = &fs_info->freed_extents[0];
 	fs_info->do_barriers = 1;
+
+	fs_info->dedup_driver = btrfs_build_dedup_driver(fs_info);
+	if (IS_ERR(fs_info->dedup_driver)) {
+		pr_info("BTRFS: Cannot load sha256 driver\n");
+		err = PTR_ERR(fs_info->dedup_driver);
+		fs_info->dedup_driver = NULL;
+		goto fail_alloc;
+	}
 
 
 	mutex_init(&fs_info->ordered_operations_mutex);
@@ -2721,6 +2750,13 @@ retry_root_backup:
 		create_uuid_tree = false;
 		check_uuid_tree =
 		    generation != btrfs_super_uuid_tree_generation(disk_super);
+	}
+
+	location.objectid = BTRFS_DEDUP_TREE_OBJECTID;
+	dedup_root = btrfs_read_tree_root(tree_root, &location);
+	if (!IS_ERR(dedup_root)) {
+		dedup_root->track_dirty = 1;
+		fs_info->dedup_root = dedup_root;
 	}
 
 	fs_info->generation = generation;
