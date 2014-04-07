@@ -87,6 +87,9 @@ struct btrfs_delayed_ref_head {
 	struct rb_node href_node;
 
 	struct btrfs_delayed_extent_op *extent_op;
+
+	int add_cnt;
+
 	/*
 	 * when a new extent is allocated, it is just reserved in memory
 	 * The actual extent isn't inserted into the extent allocation tree
