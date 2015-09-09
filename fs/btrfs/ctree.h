@@ -1457,6 +1457,8 @@ struct btrfs_fs_info {
 	 * so it is also safe.
 	 */
 	u64 max_inline;
+
+	int max_level;
 	/*
 	 * Protected by ->chunk_mutex and sb->s_umount.
 	 *
@@ -3323,11 +3325,21 @@ static inline gfp_t btrfs_alloc_write_mask(struct address_space *mapping)
 
 u64 btrfs_csum_bytes_to_leaves(struct btrfs_root *root, u64 csum_bytes);
 
+static inline u64 btrfs_level_limit(struct btrfs_root *root, int l)
+{
+	u64 ret = root->nodesize;
+	int max_ptr = BTRFS_NODEPTRS_PER_BLOCK(root) - 3;
+
+	for (; l > 1 ; l--)
+		ret *= max_ptr;
+
+	return ret;
+}
+
 static inline u64 btrfs_calc_trans_metadata_size(struct btrfs_root *root,
 						 unsigned num_items)
 {
-	return (root->nodesize + root->nodesize * (BTRFS_MAX_LEVEL - 1)) *
-		2 * num_items;
+	return (root->nodesize * root->fs_info->max_level) * 2 * num_items;
 }
 
 /*
@@ -3337,9 +3349,10 @@ static inline u64 btrfs_calc_trans_metadata_size(struct btrfs_root *root,
 static inline u64 btrfs_calc_trunc_metadata_size(struct btrfs_root *root,
 						 unsigned num_items)
 {
-	return root->nodesize * BTRFS_MAX_LEVEL * num_items;
+	return root->nodesize * root->fs_info->max_level * num_items;
 }
 
+int btrfs_calc_max_level(struct btrfs_root *root);
 int btrfs_should_throttle_delayed_refs(struct btrfs_trans_handle *trans,
 				       struct btrfs_root *root);
 int btrfs_check_space_for_delayed_refs(struct btrfs_trans_handle *trans,

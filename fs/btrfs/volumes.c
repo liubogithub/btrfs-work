@@ -2304,6 +2304,8 @@ int btrfs_init_new_device(struct btrfs_root *root, char *device_path)
 	btrfs_set_super_total_bytes(root->fs_info->super_copy,
 				    tmp + device->total_bytes);
 
+	root->fs_info->max_level = btrfs_calc_max_level(root);
+
 	tmp = btrfs_super_num_devices(root->fs_info->super_copy);
 	btrfs_set_super_num_devices(root->fs_info->super_copy,
 				    tmp + 1);
@@ -2580,6 +2582,8 @@ int btrfs_grow_device(struct btrfs_trans_handle *trans,
 
 	btrfs_set_super_total_bytes(super_copy, old_total + diff);
 	device->fs_devices->total_rw_bytes += diff;
+
+	device->dev_root->fs_info->max_level = btrfs_calc_max_level(device->dev_root);
 
 	btrfs_device_set_total_bytes(device, new_size);
 	btrfs_device_set_disk_total_bytes(device, new_size);
@@ -4218,6 +4222,8 @@ again:
 	WARN_ON(diff > old_total);
 	btrfs_set_super_total_bytes(super_copy, old_total - diff);
 	unlock_chunks(root);
+
+	root->fs_info->max_level = btrfs_calc_max_level(root);
 
 	/* Now btrfs_update_device() will change the on-disk size. */
 	ret = btrfs_update_device(trans, device);

@@ -2559,6 +2559,7 @@ int open_ctree(struct super_block *sb,
 	atomic_set(&fs_info->qgroup_op_seq, 0);
 	atomic64_set(&fs_info->tree_mod_seq, 0);
 	fs_info->sb = sb;
+	fs_info->max_level = BTRFS_MAX_LEVEL;
 	fs_info->max_inline = BTRFS_DEFAULT_MAX_INLINE;
 	fs_info->metadata_ratio = 0;
 	fs_info->defrag_inodes = RB_ROOT;
@@ -3088,6 +3089,7 @@ retry_root_backup:
 		fs_info->update_uuid_tree_gen = 1;
 	}
 
+	fs_info->max_level = btrfs_calc_max_level(fs_info->tree_root);
 	fs_info->open = 1;
 
 	return 0;

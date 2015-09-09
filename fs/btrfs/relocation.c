@@ -2162,7 +2162,7 @@ static noinline_for_stack int merge_reloc_root(struct reloc_control *rc,
 		btrfs_unlock_up_safe(path, 0);
 	}
 
-	min_reserved = root->nodesize * (BTRFS_MAX_LEVEL - 1) * 2;
+	min_reserved = root->nodesize * (root->fs_info->max_level - 1) * 2;
 	memset(&next_key, 0, sizeof(next_key));
 
 	while (1) {
@@ -2275,7 +2275,8 @@ int prepare_to_merge(struct reloc_control *rc, int err)
 	int ret;
 
 	mutex_lock(&root->fs_info->reloc_mutex);
-	rc->merging_rsv_size += root->nodesize * (BTRFS_MAX_LEVEL - 1) * 2;
+	rc->merging_rsv_size += root->nodesize *
+					(root->fs_info->max_level - 1) * 2;
 	rc->merging_rsv_size += rc->nodes_relocated * 2;
 	mutex_unlock(&root->fs_info->reloc_mutex);
 

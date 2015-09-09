@@ -3768,6 +3768,34 @@ static int update_space_info(struct btrfs_fs_info *info, u64 flags,
 	return ret;
 }
 
+int btrfs_calc_max_level(struct btrfs_root *root)
+{
+	int l = BTRFS_MAX_LEVEL;
+	u64 total = btrfs_super_total_bytes(root->fs_info->super_copy);
+	struct btrfs_space_info *sinfo;
+
+	sinfo = __find_space_info(root->fs_info, BTRFS_BLOCK_GROUP_METADATA);
+	if (!sinfo)
+		return root->fs_info->max_level;
+
+	if (sinfo->flags & BTRFS_BLOCK_GROUP_DUP ||
+	    sinfo->flags & BTRFS_BLOCK_GROUP_RAID1 ||
+	    sinfo->flags & BTRFS_BLOCK_GROUP_RAID10)
+		total >>= 1;
+
+	/* MAX_LEVEL depending on the whole disk size */
+	WARN_ON_ONCE(total < btrfs_level_limit(root, 1));
+	WARN_ON_ONCE(total >= btrfs_level_limit(root, BTRFS_MAX_LEVEL));
+	for (; l > 1; l--) {
+		if (total >= btrfs_level_limit(root, l - 1) &&
+		    total < btrfs_level_limit(root, l))
+			break;
+	}
+
+	trace_printk("max_level %d\n", l);
+	return l;
+}
+
 static void set_avail_alloc_bits(struct btrfs_fs_info *fs_info, u64 flags)
 {
 	u64 extra_flags = chunk_to_extended(flags) &
