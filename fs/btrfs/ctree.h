@@ -3339,7 +3339,11 @@ static inline u64 btrfs_level_limit(struct btrfs_root *root, int l)
 static inline u64 btrfs_calc_trans_metadata_size(struct btrfs_root *root,
 						 unsigned num_items)
 {
-	return (root->nodesize * root->fs_info->max_level) * 2 * num_items;
+	/*
+	 * Each top-down search only splits one node or leaf,
+	 * but may cow every node/leaf.
+	 */
+	return (root->nodesize * (root->fs_info->max_level + 1)) * num_items;
 }
 
 /*
