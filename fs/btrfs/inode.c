@@ -2121,7 +2121,6 @@ out:
 /* snapshot-aware defrag */
 struct sa_defrag_extent_backref {
 	struct rb_node node;
-	struct old_sa_defrag_extent *old;
 	u64 root_id;
 	u64 inum;
 	u64 file_pos;
@@ -2133,6 +2132,7 @@ struct sa_defrag_extent_backref {
 struct old_sa_defrag_extent {
 	struct list_head list;
 	struct new_sa_defrag_extent *new;
+	struct sa_defrag_extent_backref backref;
 
 	u64 extent_offset;
 	u64 bytenr;
@@ -2209,6 +2209,10 @@ static void backref_insert(struct rb_root *root,
 	rb_insert_color(&backref->node, root);
 }
 
+static noinline int relink_extent_backref(struct btrfs_path *path,
+				 struct sa_defrag_extent_backref *prev,
+				 struct sa_defrag_extent_backref *backref);
+
 /*
  * Note the backref might has changed, and in this case we just return 0.
  */
@@ -2229,6 +2233,9 @@ static noinline int record_one_backref(u64 inum, u64 offset, u64 root_id,
 	int ret;
 	u64 extent_offset;
 	u64 num_bytes;
+
+	trace_printk("inum=%llu, offset=%llu, root_id=%llu inode %llu root %llu\n",
+			 inum, offset, root_id, btrfs_ino(inode), BTRFS_I(inode)->root->root_key.objectid);
 
 	if (BTRFS_I(inode)->root->root_key.objectid == root_id &&
 	    inum == btrfs_ino(inode))
@@ -2282,41 +2289,48 @@ static noinline int record_one_backref(u64 inum, u64 offset, u64 root_id,
 
 		btrfs_item_key_to_cpu(leaf, &key, slot);
 
-		if (key.objectid > inum)
+		if (key.objectid > inum) {
+			trace_printk("key.obj %llu inum %llu mismatch\n", key.objectid, inum);
 			goto out;
+		}
 
-		if (key.objectid < inum || key.type != BTRFS_EXTENT_DATA_KEY)
+		if (key.objectid < inum || key.type != BTRFS_EXTENT_DATA_KEY) {
+			trace_printk("key.obj %llu key.type %d mismatch\n", key.objectid, key.type);
 			continue;
+		}
 
 		extent = btrfs_item_ptr(leaf, slot,
 					struct btrfs_file_extent_item);
 
-		if (btrfs_file_extent_disk_bytenr(leaf, extent) != old->bytenr)
+		if (btrfs_file_extent_disk_bytenr(leaf, extent) != old->bytenr) {
+			trace_printk("disk_bytenr %llu bytenr %llu\n", btrfs_file_extent_disk_bytenr(leaf, extent), old->bytenr);
 			continue;
+		}
 
 		/*
 		 * 'offset' refers to the exact key.offset,
 		 * NOT the 'offset' field in btrfs_extent_data_ref, ie.
 		 * (key.offset - extent_offset).
 		 */
-		if (key.offset != offset)
+		if (key.offset != offset) {
+			trace_printk("key.off %llu off %llu\n", key.offset, offset);
 			continue;
+		}
 
 		extent_offset = btrfs_file_extent_offset(leaf, extent);
 		num_bytes = btrfs_file_extent_num_bytes(leaf, extent);
 
 		if (extent_offset >= old->extent_offset + old->offset +
 		    old->len || extent_offset + num_bytes <=
-		    old->extent_offset + old->offset)
+		    old->extent_offset + old->offset) {
+			trace_printk("extent_off %llu old->ext_off+old->off %llu old-len %llu\n",
+				extent_offset, old->extent_offset + old->offset, old->len);
 			continue;
+		}
 		break;
 	}
 
-	backref = kmalloc(sizeof(*backref), GFP_NOFS);
-	if (!backref) {
-		ret = -ENOENT;
-		goto out;
-	}
+	backref = &(old->backref);
 
 	backref->root_id = root_id;
 	backref->inum = inum;
@@ -2324,8 +2338,17 @@ static noinline int record_one_backref(u64 inum, u64 offset, u64 root_id,
 	backref->num_bytes = num_bytes;
 	backref->extent_offset = extent_offset;
 	backref->generation = btrfs_file_extent_generation(leaf, extent);
-	backref->old = old;
-	backref_insert(&new->root, backref);
+
+	btrfs_release_path(path);
+
+	trace_printk("backref root_id=%llu, inum=%llu, file_pos=%llu, num_bytes=%llu, extent_offset=%llu, gen=%llu\n",
+		backref->root_id, backref->inum, backref->file_pos, backref->num_bytes, backref->extent_offset, backref->generation);
+
+	/* to reduce memory footprint, we process the backref directly */
+	ret = relink_extent_backref(path, NULL, backref);
+	WARN_ON(ret < 0);
+	ret = 0;
+
 	old->count++;
 out:
 	btrfs_release_path(path);
@@ -2339,10 +2362,13 @@ static noinline bool record_extent_backrefs(struct btrfs_path *path,
 	struct btrfs_fs_info *fs_info = BTRFS_I(new->inode)->root->fs_info;
 	struct old_sa_defrag_extent *old, *tmp;
 	int ret;
+	int cnt_old = 0;
 
 	new->path = path;
 
 	list_for_each_entry_safe(old, tmp, &new->head, list) {
+		trace_printk("index %d\n", cnt_old++);
+
 		ret = iterate_inodes_from_logical(old->bytenr +
 						  old->extent_offset, fs_info,
 						  path, record_one_backref,
@@ -2398,9 +2424,9 @@ static noinline int relink_extent_backref(struct btrfs_path *path,
 	struct btrfs_root *root;
 	struct btrfs_key key;
 	struct extent_buffer *leaf;
-	struct old_sa_defrag_extent *old = backref->old;
-	struct new_sa_defrag_extent *new = old->new;
-	struct inode *src_inode = new->inode;
+	struct old_sa_defrag_extent *old;
+	struct new_sa_defrag_extent *new;
+	struct inode *src_inode;
 	struct inode *inode;
 	struct extent_state *cached = NULL;
 	int ret = 0;
@@ -2408,13 +2434,15 @@ static noinline int relink_extent_backref(struct btrfs_path *path,
 	u64 len;
 	u64 lock_start;
 	u64 lock_end;
-	bool merge = false;
+	bool merge = true;
 	int index;
 
-	if (prev && prev->root_id == backref->root_id &&
-	    prev->inum == backref->inum &&
-	    prev->file_pos + prev->num_bytes == backref->file_pos)
-		merge = true;
+	trace_printk("--------------------------start\n");
+	old = container_of(backref, struct old_sa_defrag_extent, backref);
+	new = old->new;
+	src_inode = new->inode;
+
+	/* no prev is needed right now */
 
 	/* step 1: get root */
 	key.objectid = backref->root_id;
@@ -2575,7 +2603,8 @@ again:
 		goto out_free_path;
 	}
 
-	ret = 1;
+	/* We now call this relink directly when iterating backrefs,
+	 * so we don't need to check this 'ret' value. */
 out_free_path:
 	btrfs_release_path(path);
 	path->leave_spinning = 0;
@@ -2583,7 +2612,8 @@ out_free_path:
 out_unlock:
 	unlock_extent_cached(&BTRFS_I(inode)->io_tree, lock_start, lock_end,
 			     &cached, GFP_NOFS);
-	iput(inode);
+	btrfs_add_delayed_iput(inode);
+	trace_printk("--------------------------end ret %d\n", ret);
 	return ret;
 }
 
@@ -2846,7 +2876,7 @@ static int btrfs_finish_ordered_io(struct btrfs_ordered_extent *ordered_extent)
 			EXTENT_DEFRAG, 1, cached_state);
 	if (ret) {
 		u64 last_snapshot = btrfs_root_last_snapshot(&root->root_item);
-		if (0 && last_snapshot >= BTRFS_I(inode)->generation)
+		if (last_snapshot >= BTRFS_I(inode)->generation)
 			/* the inode is shared */
 			new = record_old_file_extents(inode, ordered_extent);
 
