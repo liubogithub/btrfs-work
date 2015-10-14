@@ -715,12 +715,15 @@ int __btrfs_drop_extents(struct btrfs_trans_handle *trans,
 	int update_refs;
 	int found = 0;
 	int leafs_visited = 0;
+	int old_spinning = path->leave_spinning;
 
 	if (drop_cache)
 		btrfs_drop_extent_cache(inode, start, end - 1, 0);
 
-	if (start >= BTRFS_I(inode)->disk_i_size && !replace_extent)
+	if (start >= BTRFS_I(inode)->disk_i_size && !replace_extent) {
 		modify_tree = 0;
+		path->leave_spinning = 1;
+	}
 
 	update_refs = (test_bit(BTRFS_ROOT_REF_COWS, &root->state) ||
 		       root == root->fs_info->tree_root);
@@ -809,6 +812,7 @@ next_slot:
 		search_start = max(key.offset, start);
 		if (recow || !modify_tree) {
 			modify_tree = -1;
+			path->leave_spinning = 0;
 			btrfs_release_path(path);
 			continue;
 		}
@@ -1011,6 +1015,7 @@ delete_extent_item:
 		btrfs_release_path(path);
 	if (drop_end)
 		*drop_end = found ? min(end, extent_end) : end;
+	path->leave_spinning = old_spinning;
 	return ret;
 }
 

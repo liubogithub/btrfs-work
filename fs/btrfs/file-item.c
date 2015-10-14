@@ -704,6 +704,7 @@ int btrfs_csum_file_blocks(struct btrfs_trans_handle *trans,
 	path = btrfs_alloc_path();
 	if (!path)
 		return -ENOMEM;
+	path->leave_spinning = 1;
 again:
 	next_offset = (u64)-1;
 	found_next = 0;
@@ -834,10 +835,8 @@ insert:
 	} else {
 		ins_size = csum_size;
 	}
-	path->leave_spinning = 1;
 	ret = btrfs_insert_empty_item(trans, root, path, &file_key,
 				      ins_size);
-	path->leave_spinning = 0;
 	if (ret < 0)
 		goto fail_unlock;
 	if (WARN_ON(ret != 0))

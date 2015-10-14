@@ -33,6 +33,7 @@ int btrfs_insert_orphan_item(struct btrfs_trans_handle *trans,
 	path = btrfs_alloc_path();
 	if (!path)
 		return -ENOMEM;
+	path->leave_spinning = 1;
 
 	ret = btrfs_insert_empty_item(trans, root, path, &key, 0);
 
@@ -54,6 +55,7 @@ int btrfs_del_orphan_item(struct btrfs_trans_handle *trans,
 	path = btrfs_alloc_path();
 	if (!path)
 		return -ENOMEM;
+	path->leave_spinning = 1;
 
 	ret = btrfs_search_slot(trans, root, &key, path, -1, 1);
 	if (ret < 0)

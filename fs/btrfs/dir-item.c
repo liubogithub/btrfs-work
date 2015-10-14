@@ -228,6 +228,7 @@ int btrfs_check_dir_item_collision(struct btrfs_root *root, u64 dir,
 	path = btrfs_alloc_path();
 	if (!path)
 		return -ENOMEM;
+	path->leave_spinning = 1;
 
 	key.objectid = dir;
 	key.type = BTRFS_DIR_ITEM_KEY;

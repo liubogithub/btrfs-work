@@ -528,6 +528,8 @@ static int btrfs_find_highest_objectid(struct btrfs_root *root, u64 *objectid)
 	if (!path)
 		return -ENOMEM;
 
+	path->leave_spinning = 1;
+
 	search_key.objectid = BTRFS_LAST_FREE_OBJECTID;
 	search_key.type = -1;
 	search_key.offset = (u64)-1;

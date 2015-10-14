@@ -46,6 +46,7 @@ ssize_t __btrfs_getxattr(struct inode *inode, const char *name,
 	if (!path)
 		return -ENOMEM;
 
+	path->leave_spinning = 1;
 	/* lookup the xattr by name */
 	di = btrfs_lookup_xattr(NULL, root, path, btrfs_ino(inode), name,
 				strlen(name), 0);
@@ -105,6 +106,7 @@ static int do_setxattr(struct btrfs_trans_handle *trans,
 	if (!path)
 		return -ENOMEM;
 	path->skip_release_on_error = 1;
+	path->leave_spinning = 1;
 
 	if (!value) {
 		di = btrfs_lookup_xattr(trans, root, path, btrfs_ino(inode),

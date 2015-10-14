@@ -87,7 +87,6 @@ noinline void btrfs_clear_path_blocking(struct btrfs_path *p,
 		else if (held_rw == BTRFS_READ_LOCK)
 			held_rw = BTRFS_READ_LOCK_BLOCKING;
 	}
-	btrfs_set_path_blocking(p);
 
 	for (i = BTRFS_MAX_LEVEL - 1; i >= 0; i--) {
 		if (p->nodes[i] && p->locks[i]) {
@@ -2536,8 +2535,16 @@ setup_nodes_for_search(struct btrfs_trans_handle *trans,
 
 		if (*write_lock_level < level + 1) {
 			*write_lock_level = level + 1;
-			btrfs_release_path(p);
-			goto again;
+
+			ASSERT(p->locks[level] == BTRFS_WRITE_LOCK ||
+			       p->locks[level] == BTRFS_READ_LOCK);
+
+			/* if it's not root node or the lock is not WRTIE_LOCK */
+			if ((level < BTRFS_MAX_LEVEL - 1 && p->nodes[level + 1]) ||
+			    p->locks[level] != BTRFS_WRITE_LOCK) {
+				btrfs_release_path(p);
+				goto again;
+			}
 		}
 
 		btrfs_set_path_blocking(p);
@@ -2555,10 +2562,32 @@ setup_nodes_for_search(struct btrfs_trans_handle *trans,
 		   BTRFS_NODEPTRS_PER_BLOCK(root) / 2) {
 		int sret;
 
+		if (btrfs_header_nritems(b) > BTRFS_NODEPTRS_PER_BLOCK(root) / 4) {
+			ret = 0;
+			goto done;
+		}
+
+		/*
+		 * If this is a root node with more than 1 items, then don't
+		 * balance at all since it's totally unnecessay.
+		 */
+		if (level < BTRFS_MAX_LEVEL - 1 && !p->nodes[level + 1] &&
+		    btrfs_header_nritems(b) != 1) {
+			ret = 0;
+			goto done;
+		}
+
 		if (*write_lock_level < level + 1) {
 			*write_lock_level = level + 1;
-			btrfs_release_path(p);
-			goto again;
+			ASSERT(p->locks[level] == BTRFS_WRITE_LOCK ||
+			       p->locks[level] == BTRFS_READ_LOCK);
+
+			/* if it's not root node or the lock is not WRTIE_LOCK */
+			if ((level < BTRFS_MAX_LEVEL - 1 && p->nodes[level + 1]) ||
+			    p->locks[level] != BTRFS_WRITE_LOCK) {
+				btrfs_release_path(p);
+				goto again;
+			}
 		}
 
 		btrfs_set_path_blocking(p);
@@ -2851,8 +2880,15 @@ cow_done:
 			if (slot == 0 && ins_len &&
 			    write_lock_level < level + 1) {
 				write_lock_level = level + 1;
-				btrfs_release_path(p);
-				goto again;
+				ASSERT(p->locks[level] == BTRFS_WRITE_LOCK ||
+				       p->locks[level] == BTRFS_READ_LOCK);
+
+				/* if it's not root node or the lock is not WRTIE_LOCK */
+				if ((level < BTRFS_MAX_LEVEL - 1 && p->nodes[level + 1]) ||
+				    p->locks[level] != BTRFS_WRITE_LOCK) {
+					btrfs_release_path(p);
+					goto again;
+				}
 			}
 
 			unlock_up(p, level, lowest_unlock,
@@ -5130,6 +5166,8 @@ int btrfs_search_forward(struct btrfs_root *root, struct btrfs_key *min_key,
 	int level;
 	int ret = 1;
 	int keep_locks = path->keep_locks;
+	u64 blocknr;
+	u64 blockgen;
 
 	path->keep_locks = 1;
 again:
@@ -5197,16 +5235,31 @@ find_next_key:
 			ret = 0;
 			goto out;
 		}
-		btrfs_set_path_blocking(path);
-		cur = read_node_slot(root, cur, slot);
-		BUG_ON(!cur); /* -ENOMEM */
 
-		btrfs_tree_read_lock(cur);
+		unlock_up(path, level, 1, 0, NULL);
+
+		blocknr = btrfs_node_blockptr(cur, slot);
+		blockgen = btrfs_node_ptr_generation(cur, slot);
+		cur = btrfs_find_tree_block(root->fs_info, blocknr);
+		if (cur && btrfs_buffer_uptodate(cur, blockgen, 1) > 0) {
+			int tmp;
+			tmp = btrfs_tree_read_lock_atomic(cur);
+			if (!tmp) {
+				btrfs_set_path_blocking(path);
+				btrfs_tree_read_lock(cur);
+				btrfs_clear_path_blocking(path, cur, BTRFS_READ_LOCK);
+			}
+		} else {
+			btrfs_set_path_blocking(path);
+			cur = read_node_slot(root, cur, slot);
+			BUG_ON(!cur); /* -ENOMEM */
+
+			btrfs_tree_read_lock(cur);
+			btrfs_clear_path_blocking(path, cur, BTRFS_READ_LOCK);
+		}
 
 		path->locks[level - 1] = BTRFS_READ_LOCK;
 		path->nodes[level - 1] = cur;
-		unlock_up(path, level, 1, 0, NULL);
-		btrfs_clear_path_blocking(path, NULL, 0);
 	}
 out:
 	path->keep_locks = keep_locks;

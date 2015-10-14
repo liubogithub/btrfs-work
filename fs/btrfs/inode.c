@@ -5347,6 +5347,7 @@ static int btrfs_inode_by_name(struct inode *dir, struct dentry *dentry,
 	if (!path)
 		return -ENOMEM;
 
+	path->leave_spinning = 1;
 	di = btrfs_lookup_dir_item(NULL, root, path, btrfs_ino(dir), name,
 				    namelen, 0);
 	if (IS_ERR(di))
@@ -6026,6 +6027,8 @@ static int btrfs_set_inode_index_count(struct inode *inode)
 	path = btrfs_alloc_path();
 	if (!path)
 		return -ENOMEM;
+
+	path->leave_spinning = 1;
 
 	ret = btrfs_search_slot(NULL, root, &key, path, 0, 0);
 	if (ret < 0)
