@@ -1911,6 +1911,10 @@ static noinline int key_in_sk(struct btrfs_key *key,
 	struct btrfs_key test;
 	int ret;
 
+	/* All we want is this type of key. */
+	if (sk->min_type == sk->max_type && key->type != sk->min_type)
+		return 0;
+
 	test.objectid = sk->min_objectid;
 	test.type = sk->min_type;
 	test.offset = sk->min_offset;
