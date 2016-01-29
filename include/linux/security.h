@@ -215,6 +215,8 @@ void security_bprm_committed_creds(struct linux_binprm *bprm);
 int security_bprm_secureexec(struct linux_binprm *bprm);
 int security_sb_alloc(struct super_block *sb);
 void security_sb_free(struct super_block *sb);
+int security_subsb_alloc(void **s_security);
+void security_subsb_free(void **s_security);
 int security_sb_copy_data(char *orig, char *copy);
 int security_sb_remount(struct super_block *sb, void *data);
 int security_sb_kern_mount(struct super_block *sb, int flags, void *data);
@@ -225,6 +227,10 @@ int security_sb_mount(const char *dev_name, struct path *path,
 int security_sb_umount(struct vfsmount *mnt, int flags);
 int security_sb_pivotroot(struct path *old_path, struct path *new_path);
 int security_sb_set_mnt_opts(struct super_block *sb,
+				struct security_mnt_opts *opts,
+				unsigned long kern_flags,
+				unsigned long *set_kern_flags);
+int security_subsb_set_mnt_opts(void **s_security, const char *fstype,
 				struct security_mnt_opts *opts,
 				unsigned long kern_flags,
 				unsigned long *set_kern_flags);
@@ -499,6 +505,14 @@ static inline int security_sb_alloc(struct super_block *sb)
 static inline void security_sb_free(struct super_block *sb)
 { }
 
+static inline int security_subsb_alloc(void **s_security)
+{
+	return 0;
+}
+
+static inline void security_sb_free(void **s_security)
+{ }
+
 static inline int security_sb_copy_data(char *orig, char *copy)
 {
 	return 0;
@@ -544,6 +558,14 @@ static inline int security_sb_pivotroot(struct path *old_path,
 }
 
 static inline int security_sb_set_mnt_opts(struct super_block *sb,
+					   struct security_mnt_opts *opts,
+					   unsigned long kern_flags,
+					   unsigned long *set_kern_flags)
+{
+	return 0;
+}
+
+static inline int security_subsb_set_mnt_opts(void **s_security, const char *fstype,
 					   struct security_mnt_opts *opts,
 					   unsigned long kern_flags,
 					   unsigned long *set_kern_flags)

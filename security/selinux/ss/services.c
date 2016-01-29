@@ -2541,12 +2541,11 @@ int security_genfs_sid(const char *fstype,
  * security_fs_use - Determine how to handle labeling for a filesystem.
  * @sb: superblock in question
  */
-int security_fs_use(struct super_block *sb)
+int security_fs_use(void **s_security, const char *fstype)
 {
 	int rc = 0;
 	struct ocontext *c;
-	struct superblock_security_struct *sbsec = sb->s_security;
-	const char *fstype = sb->s_type->name;
+	struct superblock_security_struct *sbsec = *s_security;
 
 	read_lock(&policy_rwlock);
 

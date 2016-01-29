@@ -306,6 +306,17 @@ static void file_free_security(struct file *file)
 	kmem_cache_free(file_security_cache, fsec);
 }
 
+static void init_security(struct superblock_security_struct *sbsec, struct super_block *sb)
+{
+	mutex_init(&sbsec->lock);
+	INIT_LIST_HEAD(&sbsec->isec_head);
+	spin_lock_init(&sbsec->isec_lock);
+	sbsec->sb = sb;
+	sbsec->sid = SECINITSID_UNLABELED;
+	sbsec->def_sid = SECINITSID_FILE;
+	sbsec->mntpoint_sid = SECINITSID_UNLABELED;
+}
+
 static int superblock_alloc_security(struct super_block *sb)
 {
 	struct superblock_security_struct *sbsec;
@@ -314,13 +325,7 @@ static int superblock_alloc_security(struct super_block *sb)
 	if (!sbsec)
 		return -ENOMEM;
 
-	mutex_init(&sbsec->lock);
-	INIT_LIST_HEAD(&sbsec->isec_head);
-	spin_lock_init(&sbsec->isec_lock);
-	sbsec->sb = sb;
-	sbsec->sid = SECINITSID_UNLABELED;
-	sbsec->def_sid = SECINITSID_FILE;
-	sbsec->mntpoint_sid = SECINITSID_UNLABELED;
+	init_security(sbsec, sb);
 	sb->s_security = sbsec;
 
 	return 0;
@@ -331,6 +336,32 @@ static void superblock_free_security(struct super_block *sb)
 	struct superblock_security_struct *sbsec = sb->s_security;
 	sb->s_security = NULL;
 	kfree(sbsec);
+}
+
+static int sub_superblock_alloc_security(void **s_security)
+{
+	struct superblock_security_struct *sbsec;
+
+	if (!s_security)
+		return -EINVAL;
+
+	sbsec = kzalloc(sizeof(struct superblock_security_struct), GFP_KERNEL);
+	if (!sbsec)
+		return -ENOMEM;
+
+	init_security(sbsec, NULL);
+	*s_security = sbsec;
+	trace_printk("sub_sb_alloc_security %d\n", __LINE__);
+
+	return 0;
+}
+
+static void sub_superblock_free_security(void **s_security)
+{
+	struct superblock_security_struct *sbsec = *s_security;
+	(*s_security) = NULL;
+	kfree(sbsec);
+	trace_printk("sub_sb_free_security %d\n", __LINE__);
 }
 
 /* The file system's label must be initialized prior to use. */
@@ -421,6 +452,53 @@ static int selinux_is_sblabel_mnt(struct super_block *sb)
 		!strcmp(sb->s_type->name, "pstore") ||
 		!strcmp(sb->s_type->name, "debugfs") ||
 		!strcmp(sb->s_type->name, "rootfs");
+}
+
+static int subsb_finish_set_opts(struct superblock_security_struct *sbsec)
+{
+	int rc = 0;
+
+	if (sbsec->behavior != SECURITY_FS_USE_MNTPOINT) {
+		printk("sb->behavior not MNTPOINT, not support yet\n");
+		return 0;
+	}
+
+	if (sbsec->behavior > ARRAY_SIZE(labeling_behaviors))
+		printk(KERN_ERR "SELinux: initialized (sub), unknown behavior\n");
+
+	sbsec->flags |= SE_SBINITIALIZED;
+#if 0
+	/* don't understand what this is */
+	if (selinux_is_sblabel_mnt(sb))
+		sbsec->flags |= SBLABEL_MNT;
+#endif
+
+	/* Initialize any other inodes associated with the superblock, e.g.
+	   inodes created prior to initial policy load or inodes created
+	   during get_sb by a pseudo filesystem that directly
+	   populates itself. */
+	spin_lock(&sbsec->isec_lock);
+next_inode:
+	if (!list_empty(&sbsec->isec_head)) {
+		struct inode_security_struct *isec =
+				list_entry(sbsec->isec_head.next,
+					   struct inode_security_struct, list);
+		struct inode *inode = isec->inode;
+		list_del_init(&isec->list);
+		spin_unlock(&sbsec->isec_lock);
+		inode = igrab(inode);
+		if (inode) {
+			if (!IS_PRIVATE(inode))
+				inode_doinit(inode);
+			iput(inode);
+		}
+		spin_lock(&sbsec->isec_lock);
+		goto next_inode;
+	}
+	spin_unlock(&sbsec->isec_lock);
+out:
+	return rc;
+
 }
 
 static int sb_finish_set_opts(struct super_block *sb)
@@ -608,6 +686,241 @@ static int bad_option(struct superblock_security_struct *sbsec, char flag,
 	return 0;
 }
 
+static int selinux_subsb_set_mnt_opts(void **s_security, const char *fstype,
+					struct security_mnt_opts *opts,
+					unsigned long kern_flags,
+					unsigned long *set_kern_flags)
+{
+	const struct cred *cred = current_cred();
+	int rc = 0, i;
+	struct superblock_security_struct *sbsec = (*s_security);
+	const char *name = fstype;
+	u32 fscontext_sid = 0, context_sid = 0, rootcontext_sid = 0;
+	u32 defcontext_sid = 0;
+	char **mount_options = opts->mnt_opts;
+	int *flags = opts->mnt_opts_flags;
+	int num_opts = opts->num_mnt_opts;
+
+	mutex_lock(&sbsec->lock);
+
+	if (!ss_initialized) {
+		if (!num_opts) {
+			/* Defer initialization until selinux_complete_init,
+			   after the initial policy is loaded and the security
+			   server is ready to handle calls. */
+			goto out;
+		}
+		rc = -EINVAL;
+		printk(KERN_WARNING "SELinux: Unable to set superblock options "
+			"before the security server is initialized\n");
+		goto out;
+	}
+	if (kern_flags && !set_kern_flags) {
+		/* Specifying internal flags without providing a place to
+		 * place the results is not allowed */
+		rc = -EINVAL;
+		goto out;
+	}
+
+#if 0
+	/*
+	 * Binary mount data FS will come through this function twice.  Once
+	 * from an explicit call and once from the generic calls from the vfs.
+	 * Since the generic VFS calls will not contain any security mount data
+	 * we need to skip the double mount verification.
+	 *
+	 * This does open a hole in which we will not notice if the first
+	 * mount using this sb set explict options and a second mount using
+	 * this sb does not set any security options.  (The first options
+	 * will be used for both mounts)
+	 */
+	if ((sbsec->flags & SE_SBINITIALIZED) && (sb->s_type->fs_flags & FS_BINARY_MOUNTDATA)
+	    && (num_opts == 0))
+		goto out;
+#endif
+
+	/*
+	 * parse the mount options, check if they are valid sids.
+	 * also check if someone is trying to mount the same sb more
+	 * than once with different security options.
+	 */
+	for (i = 0; i < num_opts; i++) {
+		u32 sid;
+
+		if (flags[i] == SBLABEL_MNT)
+			continue;
+		rc = security_context_str_to_sid(mount_options[i], &sid, GFP_KERNEL);
+		if (rc) {
+			WARN(rc, KERN_WARNING "SELinux: security_context_str_to_sid"
+			       "(%s) failed for errno=%d\n",
+			       mount_options[i], rc);
+			goto out;
+		}
+		switch (flags[i]) {
+		case CONTEXT_MNT:
+			context_sid = sid;
+
+			if (bad_option(sbsec, CONTEXT_MNT, sbsec->mntpoint_sid,
+					context_sid))
+				goto out_double_mount;
+
+			sbsec->flags |= CONTEXT_MNT;
+			break;
+#if 0
+		case FSCONTEXT_MNT:
+			fscontext_sid = sid;
+
+			if (bad_option(sbsec, FSCONTEXT_MNT, sbsec->sid,
+					fscontext_sid))
+				goto out_double_mount;
+
+			sbsec->flags |= FSCONTEXT_MNT;
+			break;
+		case ROOTCONTEXT_MNT:
+			rootcontext_sid = sid;
+
+			if (bad_option(sbsec, ROOTCONTEXT_MNT, root_isec->sid,
+					rootcontext_sid))
+				goto out_double_mount;
+
+			sbsec->flags |= ROOTCONTEXT_MNT;
+
+			break;
+		case DEFCONTEXT_MNT:
+			defcontext_sid = sid;
+
+			if (bad_option(sbsec, DEFCONTEXT_MNT, sbsec->def_sid,
+					defcontext_sid))
+				goto out_double_mount;
+
+			sbsec->flags |= DEFCONTEXT_MNT;
+
+			break;
+#endif
+		case DEFCONTEXT_MNT:
+		case ROOTCONTEXT_MNT:
+		case FSCONTEXT_MNT:
+		default:
+			rc = -EINVAL;
+			goto out;
+		}
+	}
+
+	if (sbsec->flags & SE_SBINITIALIZED) {
+		/* previously mounted with options, but not on this attempt? */
+		if ((sbsec->flags & SE_MNTMASK) && !num_opts)
+			goto out_double_mount;
+		rc = 0;
+		goto out;
+	}
+
+#if 0
+	if (strcmp(sb->s_type->name, "proc") == 0)
+		sbsec->flags |= SE_SBPROC | SE_SBGENFS;
+
+	if (!strcmp(sb->s_type->name, "debugfs") ||
+	    !strcmp(sb->s_type->name, "sysfs") ||
+	    !strcmp(sb->s_type->name, "pstore"))
+		sbsec->flags |= SE_SBGENFS;
+#endif
+
+	if (!sbsec->behavior) {
+		/*
+		 * Determine the labeling behavior to use for this
+		 * filesystem type.
+		 */
+		rc = security_fs_use(s_security, name);
+		if (rc) {
+			WARN(rc, KERN_WARNING
+				"%s: security_fs_use returned %d\n",
+					__func__,  rc);
+			goto out;
+		}
+	}
+#if 0
+	/* sets the context of the superblock for the fs being mounted. */
+	if (fscontext_sid) {
+		rc = may_context_mount_sb_relabel(fscontext_sid, sbsec, cred);
+		if (rc)
+			goto out;
+
+		sbsec->sid = fscontext_sid;
+	}
+#endif
+
+	/*
+	 * Switch to using mount point labeling behavior.
+	 * sets the label used on all file below the mountpoint, and will set
+	 * the superblock context if not already set.
+	 */
+	if (kern_flags & SECURITY_LSM_NATIVE_LABELS && !context_sid) {
+		sbsec->behavior = SECURITY_FS_USE_NATIVE;
+		*set_kern_flags |= SECURITY_LSM_NATIVE_LABELS;
+	}
+
+	if (context_sid) {
+		if (!fscontext_sid) {
+			rc = may_context_mount_sb_relabel(context_sid, sbsec,
+							  cred);
+			if (rc)
+				goto out;
+			sbsec->sid = context_sid;
+		} else {
+			rc = may_context_mount_inode_relabel(context_sid, sbsec,
+							     cred);
+			if (rc)
+				goto out;
+		}
+		if (!rootcontext_sid)
+			rootcontext_sid = context_sid;
+
+		sbsec->mntpoint_sid = context_sid;
+		sbsec->behavior = SECURITY_FS_USE_MNTPOINT;
+	}
+
+#if 0
+	if (rootcontext_sid) {
+		rc = may_context_mount_inode_relabel(rootcontext_sid, sbsec,
+						     cred);
+		if (rc)
+			goto out;
+
+		root_isec->sid = rootcontext_sid;
+		root_isec->initialized = 1;
+	}
+
+	if (defcontext_sid) {
+		if (sbsec->behavior != SECURITY_FS_USE_XATTR &&
+			sbsec->behavior != SECURITY_FS_USE_NATIVE) {
+			rc = -EINVAL;
+			printk(KERN_WARNING "SELinux: defcontext option is "
+			       "invalid for this filesystem type\n");
+			goto out;
+		}
+
+		if (defcontext_sid != sbsec->def_sid) {
+			rc = may_context_mount_inode_relabel(defcontext_sid,
+							     sbsec, cred);
+			if (rc)
+				goto out;
+		}
+
+		sbsec->def_sid = defcontext_sid;
+	}
+#endif
+
+	rc = subsb_finish_set_opts(sbsec);
+out:
+	mutex_unlock(&sbsec->lock);
+	return rc;
+out_double_mount:
+	rc = -EINVAL;
+	printk(KERN_WARNING "SELinux: mount invalid.  Same sub superblock, different "
+	       "security settings for type %s)\n", name);
+	goto out;
+
+}
+
 /*
  * Allow filesystems with binary mount data to explicitly set mount point
  * labeling information.
@@ -748,7 +1061,7 @@ static int selinux_set_mnt_opts(struct super_block *sb,
 		 * Determine the labeling behavior to use for this
 		 * filesystem type.
 		 */
-		rc = security_fs_use(sb);
+		rc = security_fs_use(&sb->s_security, name);
 		if (rc) {
 			printk(KERN_WARNING
 				"%s: security_fs_use(%s) returned %d\n",
@@ -2491,6 +2804,16 @@ static int selinux_sb_alloc_security(struct super_block *sb)
 static void selinux_sb_free_security(struct super_block *sb)
 {
 	superblock_free_security(sb);
+}
+
+static int selinux_subsb_alloc_security(void **s_security)
+{
+	return sub_superblock_alloc_security(s_security);
+}
+
+static void selinux_subsb_free_security(void **s_security)
+{
+	sub_superblock_free_security(s_security);
 }
 
 static inline int match_prefix(char *prefix, int plen, char *option, int olen)
@@ -5881,6 +6204,8 @@ static struct security_hook_list selinux_hooks[] = {
 
 	LSM_HOOK_INIT(sb_alloc_security, selinux_sb_alloc_security),
 	LSM_HOOK_INIT(sb_free_security, selinux_sb_free_security),
+	LSM_HOOK_INIT(subsb_alloc_security, selinux_subsb_alloc_security),
+	LSM_HOOK_INIT(subsb_free_security, selinux_subsb_free_security),
 	LSM_HOOK_INIT(sb_copy_data, selinux_sb_copy_data),
 	LSM_HOOK_INIT(sb_remount, selinux_sb_remount),
 	LSM_HOOK_INIT(sb_kern_mount, selinux_sb_kern_mount),
@@ -5889,6 +6214,7 @@ static struct security_hook_list selinux_hooks[] = {
 	LSM_HOOK_INIT(sb_mount, selinux_mount),
 	LSM_HOOK_INIT(sb_umount, selinux_umount),
 	LSM_HOOK_INIT(sb_set_mnt_opts, selinux_set_mnt_opts),
+	LSM_HOOK_INIT(subsb_set_mnt_opts, selinux_subsb_set_mnt_opts),
 	LSM_HOOK_INIT(sb_clone_mnt_opts, selinux_sb_clone_mnt_opts),
 	LSM_HOOK_INIT(sb_parse_opts_str, selinux_parse_opts_str),
 

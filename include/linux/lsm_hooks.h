@@ -86,6 +86,13 @@
  * @sb_free_security:
  *	Deallocate and clear the sb->s_security field.
  *	@sb contains the super_block structure to be modified.
+ * @subsb_alloc_security:
+ *	Allocate and attach a security structure to the passed *s_security field.
+ *	The s_security field is initialized to NULL when the structure is
+ *	allocated.
+ *	Return 0 if operation was successful.
+ * @subsb_free_security:
+ *	Deallocate and clear the passing *s_security field.
  * @sb_statfs:
  *	Check permission before obtaining filesystem statistics for the @mnt
  *	mountpoint.
@@ -134,6 +141,9 @@
  * @sb_set_mnt_opts:
  *	Set the security relevant mount options used for a superblock
  *	@sb the superblock to set security mount options for
+ *	@opts binary data structure containing all lsm mount data
+ * @subsb_set_mnt_opts:
+ *	Set the security relevant mount options used for a sub superblock
  *	@opts binary data structure containing all lsm mount data
  * @sb_clone_mnt_opts:
  *	Copy all security options from a given superblock to another
@@ -1335,6 +1345,8 @@ union security_list_options {
 
 	int (*sb_alloc_security)(struct super_block *sb);
 	void (*sb_free_security)(struct super_block *sb);
+	int (*subsb_alloc_security)(void **s_security);
+	void (*subsb_free_security)(void **s_security);
 	int (*sb_copy_data)(char *orig, char *copy);
 	int (*sb_remount)(struct super_block *sb, void *data);
 	int (*sb_kern_mount)(struct super_block *sb, int flags, void *data);
@@ -1345,6 +1357,10 @@ union security_list_options {
 	int (*sb_umount)(struct vfsmount *mnt, int flags);
 	int (*sb_pivotroot)(struct path *old_path, struct path *new_path);
 	int (*sb_set_mnt_opts)(struct super_block *sb,
+				struct security_mnt_opts *opts,
+				unsigned long kern_flags,
+				unsigned long *set_kern_flags);
+	int (*subsb_set_mnt_opts)(void **s_security, const char *fstype,
 				struct security_mnt_opts *opts,
 				unsigned long kern_flags,
 				unsigned long *set_kern_flags);
@@ -1637,6 +1653,8 @@ struct security_hook_heads {
 	struct list_head bprm_committed_creds;
 	struct list_head sb_alloc_security;
 	struct list_head sb_free_security;
+	struct list_head subsb_alloc_security;
+	struct list_head subsb_free_security;
 	struct list_head sb_copy_data;
 	struct list_head sb_remount;
 	struct list_head sb_kern_mount;
@@ -1646,6 +1664,7 @@ struct security_hook_heads {
 	struct list_head sb_umount;
 	struct list_head sb_pivotroot;
 	struct list_head sb_set_mnt_opts;
+	struct list_head subsb_set_mnt_opts;
 	struct list_head sb_clone_mnt_opts;
 	struct list_head sb_parse_opts_str;
 	struct list_head dentry_init_security;
