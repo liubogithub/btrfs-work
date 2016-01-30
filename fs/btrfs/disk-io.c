@@ -1235,6 +1235,7 @@ static void __setup_root(u32 nodesize, u32 sectorsize, u32 stripesize,
 	INIT_RADIX_TREE(&root->delayed_nodes_tree, GFP_ATOMIC);
 	root->block_rsv = NULL;
 	root->orphan_block_rsv = NULL;
+	root->s_security = NULL;
 
 	INIT_LIST_HEAD(&root->dirty_list);
 	INIT_LIST_HEAD(&root->root_list);
@@ -1527,6 +1528,7 @@ static struct btrfs_root *btrfs_read_tree_root(struct btrfs_root *tree_root,
 		goto find_fail;
 	}
 	root->commit_root = btrfs_root_node(root);
+
 out:
 	btrfs_free_path(path);
 	return root;
@@ -3694,6 +3696,9 @@ static void free_fs_root(struct btrfs_root *root)
 	kfree(root->free_ino_ctl);
 	kfree(root->free_ino_pinned);
 	kfree(root->name);
+	/* add security_free_func() here */
+	if (root->s_security)
+		security_subsb_free(&root->s_security);
 	btrfs_put_fs_root(root);
 }
 

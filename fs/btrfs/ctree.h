@@ -1980,6 +1980,9 @@ struct btrfs_root {
 
 	/* For qgroup metadata space reserve */
 	atomic_t qgroup_meta_rsv;
+
+	/* per subvolume security */
+	void *s_security;
 };
 
 struct btrfs_ioctl_defrag_range_args {

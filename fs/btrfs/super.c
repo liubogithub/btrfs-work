@@ -1277,10 +1277,17 @@ static struct dentry *mount_subvol(const char *subvol_name, u64 subvol_objectid,
 	struct dentry *root;
 	struct vfsmount *mnt = NULL;
 	char *newargs;
+	struct security_mnt_opts new_sec_opts;
 	int ret;
 
 	newargs = setup_root_args(data);
 	if (!newargs) {
+		root = ERR_PTR(-ENOMEM);
+		goto out;
+	}
+
+	security_init_mnt_opts(&new_sec_opts);
+	if (parse_security_options(newargs, &new_sec_opts)) {
 		root = ERR_PTR(-ENOMEM);
 		goto out;
 	}
@@ -1340,7 +1347,8 @@ static struct dentry *mount_subvol(const char *subvol_name, u64 subvol_objectid,
 	if (!IS_ERR(root)) {
 		struct super_block *s = root->d_sb;
 		struct inode *root_inode = d_inode(root);
-		u64 root_objectid = BTRFS_I(root_inode)->root->root_key.objectid;
+		struct btrfs_root *subvol = BTRFS_I(root_inode)->root;
+		u64 root_objectid = subvol->root_key.objectid;
 
 		ret = 0;
 		if (!is_subvolume_inode(root_inode)) {
@@ -1362,7 +1370,35 @@ static struct dentry *mount_subvol(const char *subvol_name, u64 subvol_objectid,
 			dput(root);
 			root = ERR_PTR(ret);
 			deactivate_locked_super(s);
+			goto out;
 		}
+
+#if 1
+		trace_printk("current root is %llu\n", root_objectid);
+		/*
+		 * Although right now I don't take 'reset mount label' case,
+		 * just put it here.
+		 */
+		if (!subvol->s_security) {
+			/* allocate security for subvol */
+			ret = security_subsb_alloc(&subvol->s_security);
+			if (ret) {
+				dput(root);
+				root = ERR_PTR(ret);
+				deactivate_locked_super(s);
+				goto out;
+			}
+		}
+
+		/* set per-subvol selinux label */
+		ret = security_subsb_set_mnt_opts(&subvol->s_security, sec_opts, 0, NULL);
+		if (ret) {
+			dput(root);
+			root = ERR_PTR(ret);
+			deactivate_locked_super(s);
+			goto out;
+		}
+#endif
 	}
 
 out:
@@ -1521,13 +1557,6 @@ static struct dentry *btrfs_mount(struct file_system_type *fs_type, int flags,
 		error = btrfs_fill_super(s, fs_devices, data,
 					 flags & MS_SILENT ? 1 : 0);
 	}
-	if (error) {
-		deactivate_locked_super(s);
-		goto error_sec_opts;
-	}
-
-	fs_info = btrfs_sb(s);
-	error = setup_security_options(fs_info, s, &new_sec_opts);
 	if (error) {
 		deactivate_locked_super(s);
 		goto error_sec_opts;
