@@ -2566,6 +2566,8 @@ int open_ctree(struct super_block *sb,
 	atomic_set(&fs_info->defrag_running, 0);
 	atomic_set(&fs_info->qgroup_op_seq, 0);
 	atomic64_set(&fs_info->tree_mod_seq, 0);
+	/* this will be dropped in close_ctree() */
+	atomic_set(&fs_info->active, 1);
 	fs_info->sb = sb;
 	fs_info->max_inline = BTRFS_DEFAULT_MAX_INLINE;
 	fs_info->metadata_ratio = 0;
@@ -3776,6 +3778,11 @@ void close_ctree(struct btrfs_root *root)
 {
 	struct btrfs_fs_info *fs_info = root->fs_info;
 	int ret;
+
+	if (!atomic_dec_and_test(&fs_info->active)) {
+		trace_printk("%d fs_info->active %d\n", __LINE__, atomic_read(&fs_info->active));
+		return;
+	}
 
 	fs_info->closing = 1;
 	smp_mb();

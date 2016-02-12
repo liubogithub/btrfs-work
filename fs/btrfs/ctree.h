@@ -1589,6 +1589,11 @@ struct btrfs_fs_info {
 	atomic_t async_delalloc_pages;
 	atomic_t open_ioctl_trans;
 
+	/* multiple sb record */
+	atomic_t refs;
+
+	atomic_t active;
+
 	/*
 	 * this is used to protect the following list -- ordered_roots.
 	 */
@@ -2184,6 +2189,7 @@ struct btrfs_ioctl_defrag_range_args {
 #define BTRFS_MOUNT_RESCAN_UUID_TREE	(1 << 23)
 #define BTRFS_MOUNT_FRAGMENT_DATA	(1 << 24)
 #define BTRFS_MOUNT_FRAGMENT_METADATA	(1 << 25)
+#define BTRFS_MOUNT_NOSHARECACHE	(1 << 26)
 
 #define BTRFS_DEFAULT_COMMIT_INTERVAL	(30)
 #define BTRFS_DEFAULT_MAX_INLINE	(8192)
@@ -3724,19 +3730,23 @@ static inline int btrfs_need_cleaner_sleep(struct btrfs_root *root)
 
 static inline void free_fs_info(struct btrfs_fs_info *fs_info)
 {
-	kfree(fs_info->balance_ctl);
-	kfree(fs_info->delayed_root);
-	kfree(fs_info->extent_root);
-	kfree(fs_info->tree_root);
-	kfree(fs_info->chunk_root);
-	kfree(fs_info->dev_root);
-	kfree(fs_info->csum_root);
-	kfree(fs_info->quota_root);
-	kfree(fs_info->uuid_root);
-	kfree(fs_info->super_copy);
-	kfree(fs_info->super_for_commit);
-	security_free_mnt_opts(&fs_info->security_opts);
-	kfree(fs_info);
+	trace_printk("%d fs_info ref %d\n", __LINE__, atomic_read(&fs_info->refs));
+	if (atomic_dec_and_test(&fs_info->refs)) {
+		kfree(fs_info->balance_ctl);
+		kfree(fs_info->delayed_root);
+		kfree(fs_info->extent_root);
+		kfree(fs_info->tree_root);
+		kfree(fs_info->chunk_root);
+		kfree(fs_info->dev_root);
+		kfree(fs_info->csum_root);
+		kfree(fs_info->quota_root);
+		kfree(fs_info->uuid_root);
+		kfree(fs_info->super_copy);
+		kfree(fs_info->super_for_commit);
+		security_free_mnt_opts(&fs_info->security_opts);
+		kfree(fs_info);
+		trace_printk("fs_info finally freed\n");
+	}
 }
 
 /* tree mod log functions from ctree.c */

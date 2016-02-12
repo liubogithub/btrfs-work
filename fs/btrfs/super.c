@@ -302,7 +302,7 @@ enum {
 	Opt_check_integrity_print_mask, Opt_fatal_errors, Opt_rescan_uuid_tree,
 	Opt_commit_interval, Opt_barrier, Opt_nodefrag, Opt_nodiscard,
 	Opt_noenospc_debug, Opt_noflushoncommit, Opt_acl, Opt_datacow,
-	Opt_datasum, Opt_treelog, Opt_noinode_cache,
+	Opt_datasum, Opt_treelog, Opt_noinode_cache, Opt_nosharecache,
 #ifdef CONFIG_BTRFS_DEBUG
 	Opt_fragment_data, Opt_fragment_metadata, Opt_fragment_all,
 #endif
@@ -314,6 +314,7 @@ static match_table_t tokens = {
 	{Opt_subvol, "subvol=%s"},
 	{Opt_subvolid, "subvolid=%s"},
 	{Opt_device, "device=%s"},
+	{Opt_nosharecache, "nosharecache=%s"},
 	{Opt_nodatasum, "nodatasum"},
 	{Opt_datasum, "datasum"},
 	{Opt_nodatacow, "nodatacow"},
@@ -414,6 +415,7 @@ int btrfs_parse_options(struct btrfs_root *root, char *options)
 		case Opt_subvolid:
 		case Opt_subvolrootid:
 		case Opt_device:
+		case Opt_nosharecache:
 			/*
 			 * These are parsed by btrfs_parse_early_options
 			 * and can be happily ignored here.
@@ -768,7 +770,7 @@ out:
  */
 static int btrfs_parse_early_options(const char *options, fmode_t flags,
 		void *holder, char **subvol_name, u64 *subvol_objectid,
-		struct btrfs_fs_devices **fs_devices)
+		struct btrfs_fs_devices **fs_devices, u64 *nosharecache)
 {
 	substring_t args[MAX_OPT_ARGS];
 	char *device_name, *opts, *orig, *p;
@@ -832,6 +834,25 @@ static int btrfs_parse_early_options(const char *options, fmode_t flags,
 			kfree(device_name);
 			if (error)
 				goto out;
+			break;
+		case Opt_nosharecache:
+			/*
+			 * Allocate new superblock for subvol, for selinux
+			 * mount label
+			 */
+			num = match_strdup(&args[0]);
+			if (num) {
+				*nosharecache = memparse(num, NULL);
+				kfree(num);
+				if (!*nosharecache)
+					*nosharecache = BTRFS_FS_TREE_OBJECTID;
+
+				printk("AHHH, we're going to have a new sb subvol %llu\n", *nosharecache);
+			} else {
+				printk("use -o nosharecache, but no place to have\n");
+				error = -EINVAL;
+				goto out;
+			}
 			break;
 		default:
 			break;
@@ -1022,11 +1043,12 @@ static int get_default_subvol_objectid(struct btrfs_fs_info *fs_info, u64 *objec
 
 static int btrfs_fill_super(struct super_block *sb,
 			    struct btrfs_fs_devices *fs_devices,
-			    void *data, int silent)
+			    void *data, int silent, u64 nosharecache)
 {
 	struct inode *inode;
 	struct btrfs_fs_info *fs_info = btrfs_sb(sb);
 	struct btrfs_key key;
+	struct btrfs_root *file_root = NULL;
 	int err;
 
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
@@ -1041,16 +1063,69 @@ static int btrfs_fill_super(struct super_block *sb,
 #endif
 	sb->s_flags |= MS_I_VERSION;
 	sb->s_iflags |= SB_I_CGROUPWB;
-	err = open_ctree(sb, fs_devices, (char *)data);
-	if (err) {
-		printk(KERN_ERR "BTRFS: open_ctree failed\n");
-		return err;
+	if (!nosharecache) {
+		err = open_ctree(sb, fs_devices, (char *)data);
+		if (err) {
+			printk(KERN_ERR "BTRFS: open_ctree failed\n");
+			return err;
+		}
+		file_root = fs_info->fs_root;
+	} else {
+		if (!fs_devices->fs_info) {
+			printk("DEBUG: fs_devices->fs_info is NULL\n");
+			return -EINVAL;
+		} else {
+			struct btrfs_fs_info *orig_fs_info;
+
+			if (atomic_read(&fs_devices->fs_info->active) == 0) {
+				printk("you must mount before this\n");
+				return -EINVAL;
+			}
+
+			orig_fs_info = fs_devices->fs_info;
+
+			btrfs_close_devices(fs_devices);
+			free_fs_info(fs_info);
+			/*
+			 * NOTE:
+			 * After this, sb->s_fs_info points to the global
+			 * fs_info, but fs_info->sb doesn't point this sb.
+			 */
+			sb->s_fs_info = orig_fs_info;
+			fs_info = orig_fs_info;
+
+			/* sb takes a reference on this fs_info */
+			atomic_inc(&fs_info->refs);
+
+			/* this will be dropped in close_ctree() */
+			WARN_ON(atomic_read(&fs_info->active) == 0);
+			atomic_inc(&fs_info->active);
+
+			/* manually initialise sb */
+			sb->s_blocksize = 4096;
+			sb->s_blocksize_bits = blksize_bits(4096);
+			sb->s_bdi = &fs_info->bdi;
+			trace_printk("%d sb initial fs_info ref %d nosharecache(subvol) %llu\n", __LINE__, atomic_read(&fs_info->refs), nosharecache);
+
+			key.objectid = nosharecache;
+			key.type = BTRFS_ROOT_ITEM_KEY;
+			key.offset = (u64)-1;
+			file_root = btrfs_read_fs_root_no_name(fs_info, &key);
+			if (IS_ERR(file_root)) {
+				printk(KERN_INFO "%s: %d: subvol file root is not there\n", __func__, __LINE__);
+				return PTR_ERR(file_root);
+			}
+
+			/* special hack to set mount option */
+			btrfs_set_and_info(file_root, NOSHARECACHE,
+					   "setting nosharecache");
+		}
 	}
 
 	key.objectid = BTRFS_FIRST_FREE_OBJECTID;
 	key.type = BTRFS_INODE_ITEM_KEY;
 	key.offset = 0;
-	inode = btrfs_iget(sb, &key, fs_info->fs_root, NULL);
+	inode = btrfs_iget(sb, &key, file_root, NULL);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
 		goto fail_close;
@@ -1271,6 +1346,7 @@ static char *setup_root_args(char *args)
 }
 
 static struct dentry *mount_subvol(const char *subvol_name, u64 subvol_objectid,
+				   u64 nosharecache,
 				   int flags, const char *device_name,
 				   char *data)
 {
@@ -1330,7 +1406,25 @@ static struct dentry *mount_subvol(const char *subvol_name, u64 subvol_objectid,
 			subvol_name = NULL;
 			goto out;
 		}
+		trace_printk("%d: subvol_name %s\n", __LINE__, subvol_name);
 
+	}
+
+	if (nosharecache) {
+		char *name = NULL;
+
+		kfree(subvol_name);
+		subvol_name = NULL;
+		name = kmalloc(PATH_MAX, GFP_NOFS);
+		if (!name) {
+			root = ERR_PTR(-ENOMEM);
+			goto out;
+		}
+
+		name[0] = '/';
+		name[1] = '\0';
+		subvol_name = name;
+		trace_printk("%d: nosharecache name %s\n", __LINE__, subvol_name);
 	}
 
 	root = mount_subtree(mnt, subvol_name);
@@ -1440,13 +1534,15 @@ static struct dentry *btrfs_mount(struct file_system_type *fs_type, int flags,
 	char *subvol_name = NULL;
 	u64 subvol_objectid = 0;
 	int error = 0;
+	u64 nosharecache = 0;
+	int (*test_super)(struct super_block *, void *) = btrfs_test_super;
 
 	if (!(flags & MS_RDONLY))
 		mode |= FMODE_WRITE;
 
 	error = btrfs_parse_early_options(data, mode, fs_type,
 					  &subvol_name, &subvol_objectid,
-					  &fs_devices);
+					  &fs_devices, &nosharecache);
 	if (error) {
 		kfree(subvol_name);
 		return ERR_PTR(error);
@@ -1454,7 +1550,7 @@ static struct dentry *btrfs_mount(struct file_system_type *fs_type, int flags,
 
 	if (subvol_name || subvol_objectid != BTRFS_FS_TREE_OBJECTID) {
 		/* mount_subvol() will free subvol_name. */
-		return mount_subvol(subvol_name, subvol_objectid, flags,
+		return mount_subvol(subvol_name, subvol_objectid, nosharecache, flags,
 				    device_name, data);
 	}
 
@@ -1481,6 +1577,8 @@ static struct dentry *btrfs_mount(struct file_system_type *fs_type, int flags,
 		goto error_sec_opts;
 	}
 
+	atomic_set(&fs_info->refs, 1);
+	atomic_set(&fs_info->active, 0);
 	fs_info->fs_devices = fs_devices;
 
 	fs_info->super_copy = kzalloc(BTRFS_SUPER_INFO_SIZE, GFP_NOFS);
@@ -1501,7 +1599,9 @@ static struct dentry *btrfs_mount(struct file_system_type *fs_type, int flags,
 	}
 
 	bdev = fs_devices->latest_bdev;
-	s = sget(fs_type, btrfs_test_super, btrfs_set_super, flags | MS_NOSEC,
+	if (nosharecache)
+		test_super = NULL;
+	s = sget(fs_type, test_super, btrfs_set_super, flags | MS_NOSEC,
 		 fs_info);
 	if (IS_ERR(s)) {
 		error = PTR_ERR(s);
@@ -1519,7 +1619,7 @@ static struct dentry *btrfs_mount(struct file_system_type *fs_type, int flags,
 		strlcpy(s->s_id, bdevname(bdev, b), sizeof(s->s_id));
 		btrfs_sb(s)->bdev_holder = fs_type;
 		error = btrfs_fill_super(s, fs_devices, data,
-					 flags & MS_SILENT ? 1 : 0);
+					 flags & MS_SILENT ? 1 : 0, nosharecache);
 	}
 	if (error) {
 		deactivate_locked_super(s);
@@ -2039,6 +2139,7 @@ static void btrfs_kill_super(struct super_block *sb)
 {
 	struct btrfs_fs_info *fs_info = btrfs_sb(sb);
 	kill_anon_super(sb);
+	printk("fs_info is free\n");
 	free_fs_info(fs_info);
 }
 

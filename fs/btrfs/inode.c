@@ -5456,8 +5456,12 @@ static void inode_tree_add(struct inode *inode)
 		else if (ino > btrfs_ino(&entry->vfs_inode))
 			p = &parent->rb_right;
 		else {
-			WARN_ON(!(entry->vfs_inode.i_state &
-				  (I_WILL_FREE | I_FREEING)));
+			if ((root->objectid < BTRFS_FIRST_FREE_OBJECTID ||
+			       root->objectid > BTRFS_LAST_FREE_OBJECTID) ||
+			      !btrfs_test_opt(root, NOSHARECACHE)) {
+				WARN_ON(!(entry->vfs_inode.i_state &
+					  (I_WILL_FREE | I_FREEING)));
+			}
 			rb_replace_node(parent, new, &root->inode_tree);
 			RB_CLEAR_NODE(parent);
 			spin_unlock(&root->inode_lock);
