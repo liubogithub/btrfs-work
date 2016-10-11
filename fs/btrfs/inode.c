@@ -7664,6 +7664,118 @@ static void adjust_dio_outstanding_extents(struct inode *inode,
 	}
 }
 
+#define DAX_DEBUG
+
+noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
+					struct buffer_head *bh_result,
+					int create)
+{
+	u64 start = iblock << inode->i_blkbits;
+	u64 len = bh_result->b_size;
+	u64 lockstart, lockend;
+	struct extent_state *cached_state = NULL;
+	struct btrfs_ordered_extent *ordered = NULL;
+	struct extent_map *em;
+	int ret;
+
+	lockstart = start;
+	lockend = start + len - 1;
+
+	/* caller ensures that start < inode->i_size and b_size is PAGE_SIZE */
+	ASSERT(start < inode->i_size);
+	ASSERT(len == PAGE_SIZE);
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d create %d\n", btrfs_ino(inode), start, len, (int)inode->i_size, create);
+#endif
+
+	while (1) {
+		lock_extent_bits(&BTRFS_I(inode)->io_tree, lockstart, lockend, &cached_state);
+		ordered = btrfs_lookup_ordered_range(inode, lockstart, lockend - lockstart + 1);
+
+		if (!ordered)
+			break;
+
+		unlock_extent_cached(&BTRFS_I(inode)->io_tree, lockstart, lockend, &cached_state, GFP_NOFS);
+
+		if (ordered->file_offset + ordered->len > lockstart && ordered->file_offset <= lockend) {
+			btrfs_start_ordered_extent(inode, ordered, 1);
+			btrfs_put_ordered_extent(ordered);
+			return -ENOTBLK;  /* is this right? */
+		}
+		btrfs_put_ordered_extent(ordered);
+
+		cond_resched();
+	}
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d after looking up ordered exent\n", btrfs_ino(inode), start, len, (int)inode->i_size);
+#endif
+
+	em = btrfs_get_extent(inode, NULL, 0, start, len, 0);
+	if (IS_ERR(em)) {
+		ret = PTR_ERR(em);
+		goto unlock_err; /* is this right? */
+	}
+
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d getting em: em->flags %llu em->block_start %llu em->block_len %llu\n", btrfs_ino(inode), start, len, (int)inode->i_size, em->flags, em->block_start, em->block_len);
+#endif
+	if (test_bit(EXTENT_FLAG_COMPRESSED, &em->flags) ||
+	    em->block_start == EXTENT_MAP_INLINE) {
+		free_extent_map(em);
+		ret = -ENOTBLK;
+		goto unlock_err;
+	}
+
+	if (!create && (em->block_start == EXTENT_MAP_HOLE || test_bit(EXTENT_FLAG_PREALLOC, &em->flags))) {
+		free_extent_map(em);
+		goto unlock_err;
+	}
+
+	if (!create) {
+		goto unlock;
+	}
+
+unlock:
+
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d | map_block: em->block_start %llu em->start %llu\n", btrfs_ino(inode), start, len, (int)inode->i_size, em->block_start, em->start);
+#endif
+
+	{
+		struct btrfs_root *root = BTRFS_I(inode)->root;
+		u64 logical;
+		u64 map_length;
+		struct btrfs_bio *bbio = NULL;
+
+		logical = (em->block_start + (start - em->start)) >> inode->i_blkbits;
+		map_length = len;
+
+		ret = btrfs_map_block(root->fs_info, REQ_OP_READ, logical, &map_length, &bbio, 0);
+		ASSERT(!ret);
+
+		bh_result->b_blocknr = bbio->stripes[0].physical;
+		bh_result->b_size = len;
+		bh_result->b_bdev = em->bdev;
+
+#ifdef DAX_DEBUG
+		trace_printk("inode %llu start %llu len %llu i_size %d | map_block: logical %llu physical %llu bh->b_blocknr %llu\n", btrfs_ino(inode), start, len, (int)inode->i_size, logical, physical, bh_result->b_blocknr);
+#endif
+
+		/* free bbio */
+		btrfs_put_bbio(bbio);
+	}
+
+	set_buffer_mapped(bh_result);
+	/* don't set buffer new, zero blocks by ourselves */
+
+unlock_err:
+	ASSERT(lockstart < lockend);
+	unlock_extent_cached(&BTRFS_I(inode)->io_tree, lockstart, lockend, &cached_state, GFP_NOFS);
+	free_extent_map(em);
+
+	return 0;
+}
+
 static int btrfs_get_blocks_direct(struct inode *inode, sector_t iblock,
 				   struct buffer_head *bh_result, int create)
 {
@@ -9001,7 +9113,6 @@ int btrfs_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 
 	reserved_space = PAGE_SIZE;
 
-	sb_start_pagefault(inode->i_sb);
 	page_start = page_offset(page);
 	page_end = page_start + PAGE_SIZE - 1;
 	end = page_end;
@@ -9117,14 +9228,12 @@ again:
 
 out_unlock:
 	if (!ret) {
-		sb_end_pagefault(inode->i_sb);
 		return VM_FAULT_LOCKED;
 	}
 	unlock_page(page);
 out:
 	btrfs_delalloc_release_space(inode, page_start, reserved_space);
 out_noreserve:
-	sb_end_pagefault(inode->i_sb);
 	return ret;
 }
 

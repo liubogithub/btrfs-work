@@ -32,6 +32,7 @@
 #include <linux/slab.h>
 #include <linux/btrfs.h>
 #include <linux/uio.h>
+#include <linux/dax.h>
 #include "ctree.h"
 #include "disk-io.h"
 #include "transaction.h"
@@ -2157,10 +2158,54 @@ out:
 	return ret > 0 ? -EIO : ret;
 }
 
+static int btrfs_filemap_page_mkwrite(struct vm_area_struct *vma,
+				      struct vm_fault *vmf)
+{
+	struct inode *inode = file_inode(vma->vm_file);
+	int ret;
+
+	sb_start_pagefault(inode->i_sb);
+	file_update_time(vma->vm_file);
+
+	if (IS_DAX(inode)) {
+		ret = dax_mkwrite(vma, vmf, btrfs_get_blocks_dax_fault);
+	} else {
+		ret = btrfs_page_mkwrite(vma, vmf);
+	}
+
+	sb_end_pagefault(inode->i_sb);
+	return ret;
+}
+
+static int btrfs_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+{
+	struct inode *inode = file_inode(vma->vm_file);
+	int ret;
+
+	if ((vmf->flags & FAULT_FLAG_WRITE) && IS_DAX(inode))
+		return btrfs_filemap_page_mkwrite(vma, vmf);
+
+	if (IS_DAX(inode)) {
+		ret = dax_fault(vma, vmf, btrfs_get_blocks_dax_fault);
+	} else {
+		ret = filemap_fault(vma, vmf);
+	}
+
+	return ret;
+}
+
+static int btrfs_filemap_pfn_mkwrite(struct vm_area_struct *vma,
+				     struct vm_fault *vmf)
+{
+	return 0;
+}
+
 static const struct vm_operations_struct btrfs_file_vm_ops = {
-	.fault		= filemap_fault,
+	.fault		= btrfs_filemap_fault,
+//	.pmd_fault	= btrfs_filemap_pmd_fault,
 	.map_pages	= filemap_map_pages,
-	.page_mkwrite	= btrfs_page_mkwrite,
+	.page_mkwrite	= btrfs_filemap_page_mkwrite,
+	.pfn_mkwrite	= btrfs_filemap_pfn_mkwrite,
 };
 
 static int btrfs_file_mmap(struct file	*filp, struct vm_area_struct *vma)
@@ -2172,6 +2217,8 @@ static int btrfs_file_mmap(struct file	*filp, struct vm_area_struct *vma)
 
 	file_accessed(filp);
 	vma->vm_ops = &btrfs_file_vm_ops;
+	if (IS_DAX(file_inode(filp)))
+		vma->vm_flags |= VM_MIXEDMAP | VM_HUGEPAGE;
 
 	return 0;
 }
