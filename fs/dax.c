@@ -668,7 +668,7 @@ static void *dax_insert_mapping_entry(struct address_space *mapping,
 	return new_entry;
 }
 
-static int dax_writeback_one(struct block_device *bdev,
+static noinline int dax_writeback_one(struct block_device *bdev,
 		struct address_space *mapping, pgoff_t index, void *entry)
 {
 	struct radix_tree_root *page_tree = &mapping->page_tree;
@@ -782,6 +782,7 @@ int dax_writeback_mapping_range(struct address_space *mapping,
 
 			ret = dax_writeback_one(bdev, mapping, indices[i],
 					pvec.pages[i]);
+			trace_printk("inode %d ret %d start_index %d end_index %d i %d index %d\n", (int)inode->i_ino, ret, (int)start_index, (int)end_index, (int)i, (int)indices[i]);
 			if (ret < 0)
 				return ret;
 		}
