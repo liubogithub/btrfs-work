@@ -2271,7 +2271,7 @@ oom:
  * Handle write page faults for VM_MIXEDMAP or VM_PFNMAP for a VM_SHARED
  * mapping
  */
-static int wp_pfn_shared(struct fault_env *fe,  pte_t orig_pte)
+static noinline int wp_pfn_shared(struct fault_env *fe,  pte_t orig_pte)
 {
 	struct vm_area_struct *vma = fe->vma;
 
@@ -2360,7 +2360,7 @@ static int wp_page_shared(struct fault_env *fe, pte_t orig_pte,
  * but allow concurrent faults), with pte both mapped and locked.
  * We return with mmap_sem still held, but pte unmapped and unlocked.
  */
-static int do_wp_page(struct fault_env *fe, pte_t orig_pte)
+static noinline int do_wp_page(struct fault_env *fe, pte_t orig_pte)
 	__releases(fe->ptl)
 {
 	struct vm_area_struct *vma = fe->vma;
@@ -2847,7 +2847,7 @@ oom:
  * released depending on flags and vma->vm_ops->fault() return value.
  * See filemap_fault() and __lock_page_retry().
  */
-static int __do_fault(struct fault_env *fe, pgoff_t pgoff,
+static noinline int __do_fault(struct fault_env *fe, pgoff_t pgoff,
 		struct page *cow_page, struct page **page, void **entry)
 {
 	struct vm_area_struct *vma = fe->vma;
@@ -3171,7 +3171,7 @@ out:
 	return ret;
 }
 
-static int do_read_fault(struct fault_env *fe, pgoff_t pgoff)
+static noinline int do_read_fault(struct fault_env *fe, pgoff_t pgoff)
 {
 	struct vm_area_struct *vma = fe->vma;
 	struct page *fault_page;
@@ -3201,7 +3201,7 @@ static int do_read_fault(struct fault_env *fe, pgoff_t pgoff)
 	return ret;
 }
 
-static int do_cow_fault(struct fault_env *fe, pgoff_t pgoff)
+static noinline int do_cow_fault(struct fault_env *fe, pgoff_t pgoff)
 {
 	struct vm_area_struct *vma = fe->vma;
 	struct page *fault_page, *new_page;
@@ -3248,7 +3248,7 @@ uncharge_out:
 	return ret;
 }
 
-static int do_shared_fault(struct fault_env *fe, pgoff_t pgoff)
+static noinline int do_shared_fault(struct fault_env *fe, pgoff_t pgoff)
 {
 	struct vm_area_struct *vma = fe->vma;
 	struct page *fault_page;
@@ -3314,7 +3314,7 @@ static int do_shared_fault(struct fault_env *fe, pgoff_t pgoff)
  * The mmap_sem may have been released depending on flags and our
  * return value.  See filemap_fault() and __lock_page_or_retry().
  */
-static int do_fault(struct fault_env *fe)
+static noinline int do_fault(struct fault_env *fe)
 {
 	struct vm_area_struct *vma = fe->vma;
 	pgoff_t pgoff = linear_page_index(vma, fe->address);
@@ -3479,7 +3479,7 @@ static inline bool vma_is_accessible(struct vm_area_struct *vma)
  * The mmap_sem may have been released depending on flags and our return value.
  * See filemap_fault() and __lock_page_or_retry().
  */
-static int handle_pte_fault(struct fault_env *fe)
+static noinline int handle_pte_fault(struct fault_env *fe)
 {
 	pte_t entry;
 
@@ -3567,7 +3567,7 @@ unlock:
  * The mmap_sem may have been released depending on flags and our
  * return value.  See filemap_fault() and __lock_page_or_retry().
  */
-static int __handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
+static noinline int __handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 		unsigned int flags)
 {
 	struct fault_env fe = {
