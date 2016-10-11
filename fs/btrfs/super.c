@@ -323,7 +323,7 @@ enum {
 	Opt_commit_interval, Opt_barrier, Opt_nodefrag, Opt_nodiscard,
 	Opt_noenospc_debug, Opt_noflushoncommit, Opt_acl, Opt_datacow,
 	Opt_datasum, Opt_treelog, Opt_noinode_cache, Opt_usebackuproot,
-	Opt_nologreplay, Opt_norecovery,
+	Opt_nologreplay, Opt_norecovery, Opt_dax,
 #ifdef CONFIG_BTRFS_DEBUG
 	Opt_fragment_data, Opt_fragment_metadata, Opt_fragment_all,
 #endif
@@ -383,6 +383,7 @@ static const match_table_t tokens = {
 	{Opt_rescan_uuid_tree, "rescan_uuid_tree"},
 	{Opt_fatal_errors, "fatal_errors=%s"},
 	{Opt_commit_interval, "commit=%d"},
+	{Opt_dax, "dax"},
 #ifdef CONFIG_BTRFS_DEBUG
 	{Opt_fragment_data, "fragment=data"},
 	{Opt_fragment_metadata, "fragment=metadata"},
@@ -489,6 +490,11 @@ int btrfs_parse_options(struct btrfs_root *root, char *options,
 		case Opt_datacow:
 			btrfs_clear_and_info(info, NODATACOW,
 					     "setting datacow");
+			break;
+		case Opt_dax:
+			btrfs_set_and_info(info, NODATASUM,
+					   "setting nodatasum");
+			btrfs_set_and_info(info, DAX, "setting dax");
 			break;
 		case Opt_compress_force:
 		case Opt_compress_force_type:
@@ -1232,6 +1238,8 @@ static int btrfs_show_options(struct seq_file *seq, struct dentry *dentry)
 		seq_puts(seq, ",nodatasum");
 	if (btrfs_test_opt(info, NODATACOW))
 		seq_puts(seq, ",nodatacow");
+	if (btrfs_test_opt(info, DAX))
+		seq_puts(seq, ",dax");
 	if (btrfs_test_opt(info, NOBARRIER))
 		seq_puts(seq, ",nobarrier");
 	if (info->max_inline != BTRFS_DEFAULT_MAX_INLINE)
