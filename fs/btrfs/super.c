@@ -471,6 +471,8 @@ int btrfs_parse_options(struct btrfs_root *root, char *options,
 			btrfs_clear_opt(info->mount_opt, NODATACOW);
 			btrfs_clear_opt(info->mount_opt, NODATASUM);
 			break;
+		case Opt_dax:
+			btrfs_set_and_info(info, DAX, "setting dax");
 		case Opt_nodatacow:
 			if (!btrfs_test_opt(info, NODATACOW)) {
 				if (!btrfs_test_opt(info, COMPRESS) ||
@@ -490,11 +492,6 @@ int btrfs_parse_options(struct btrfs_root *root, char *options,
 		case Opt_datacow:
 			btrfs_clear_and_info(info, NODATACOW,
 					     "setting datacow");
-			break;
-		case Opt_dax:
-			btrfs_set_and_info(info, NODATASUM,
-					   "setting nodatasum");
-			btrfs_set_and_info(info, DAX, "setting dax");
 			break;
 		case Opt_compress_force:
 		case Opt_compress_force_type:
