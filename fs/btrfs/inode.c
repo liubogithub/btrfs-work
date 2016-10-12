@@ -7727,13 +7727,11 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 #endif
 	if (test_bit(EXTENT_FLAG_COMPRESSED, &em->flags) ||
 	    em->block_start == EXTENT_MAP_INLINE) {
-		free_extent_map(em);
 		ret = -EIO;	/* dio uses ENOTBLK. */
 		goto unlock_err;
 	}
 
 	if (!create && (em->block_start == EXTENT_MAP_HOLE || test_bit(EXTENT_FLAG_PREALLOC, &em->flags))) {
-		free_extent_map(em);
 		goto unlock_err;
 	}
 
