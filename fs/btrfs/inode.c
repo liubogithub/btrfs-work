@@ -7666,6 +7666,116 @@ static void adjust_dio_outstanding_extents(struct inode *inode,
 
 #define DAX_DEBUG
 
+static noinline struct extent_map *btrfs_new_extent_dax(struct inode *inode,
+							u64 start, u64 len)
+{
+	struct btrfs_root *root = BTRFS_I(inode)->root;
+	struct btrfs_trans_handle *trans = NULL;
+	struct extent_map *em = NULL;
+	struct btrfs_key ins;
+	bool release_rsv = false;
+	u64 alloc_hint;
+	int ret;
+
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d ++ entry of new_extent_dax\n", btrfs_ino(inode), start, len, (int)inode->i_size);
+#endif
+
+	/*
+	 * reserve data firstly, len is added to data_space_info->bytes_may_use
+	 * if it's successful.
+	 */
+	ret = btrfs_check_data_free_space(inode, start, len);
+	if (ret < 0) {
+		/*
+		 * Since we've known that this is neither a prealloc case nor
+		 * a nocow case, skip check_can_nocow and return whatever we
+		 * got.
+		 */
+		return ERR_PTR(ret);
+	}
+	ASSERT(ret == 0);
+
+	ret = btrfs_delalloc_reserve_metadata(inode, len);
+	if (ret) {
+		btrfs_free_reserved_data_space(inode, start, len);
+		return ERR_PTR(ret);
+	}
+
+	release_rsv = true;
+	alloc_hint = get_extent_allocation_hint(inode, start, len);
+	ret = btrfs_reserve_extent(root, len, len, root->sectorsize, 0,
+				   alloc_hint, &ins, 1, 0);
+	if (ret) {
+		goto out;
+	}
+
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d ++ after reserve_extent alloc_hint %llu ins %llu %llu ret %d\n", btrfs_ino(inode), start, len, (int)inode->i_size, alloc_hint, ins.objectid, ins.offset, ret);
+#endif
+
+	ASSERT(len == ins.offset);
+	em = create_pinned_em(inode, start, len, start, ins.objectid,
+			      len, len, len, 0);
+	if (IS_ERR(em)) {
+		ret = PTR_ERR(em);
+		em = NULL;
+		goto out;
+	}
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d ++ after creating em %llu %llu flags %d ret %d\n", btrfs_ino(inode), start, len, (int)inode->i_size, em->start, em->len, (int)em->flags, ret);
+#endif
+
+	trans = btrfs_join_transaction(root);
+	if (IS_ERR(trans)) {
+		ret = PTR_ERR(trans);
+		trans = NULL;
+		goto out;
+	}
+	trans->block_rsv = &root->fs_info->delalloc_block_rsv;
+
+	ret = insert_reserved_file_extent(trans, inode,
+					  start, /* file_pos */
+					  ins.objectid, /* disk_bytenr */
+					  len, /* disk_num_bytes */
+					  len, /* num_bytes */
+					  len, /* ram_bytes */
+					  0, /* compression */
+					  0, /* encryption */
+					  0, /* other_encoding */
+					  BTRFS_FILE_EXTENT_REG);
+	unpin_extent_cache(&BTRFS_I(inode)->extent_tree, start, len, trans->transid);
+	if (ret)
+		goto out;
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d ++ after insert_reserved_file_extent and unpin ret %d\n", btrfs_ino(inode), start, len, (int)inode->i_size, ret);
+#endif
+
+	ret = btrfs_update_inode_fallback(trans, root, inode);
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d ++ after update_inode ret %d\n", btrfs_ino(inode), start, len, (int)inode->i_size, ret);
+#endif
+	release_rsv = false;
+out:
+	if (trans)
+		btrfs_end_transaction(trans, root);
+
+	if (ret) {
+		free_extent_map(em);
+		btrfs_drop_extent_cache(inode, start, start + len - 1, 0);
+	}
+
+	if (release_rsv)
+		btrfs_delalloc_release_space(inode, start, len);
+	else
+		btrfs_delalloc_release_metadata(inode, len);
+
+	ASSERT(ret <= 0);
+	if (ret < 0)
+		em = ERR_PTR(ret);
+	return em;
+}
+
 noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 					struct buffer_head *bh_result,
 					int create)
@@ -7685,6 +7795,8 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 
 	/* caller ensures that start < inode->i_size and b_size is PAGE_SIZE */
 	ASSERT(start < inode->i_size);
+	ASSERT(IS_ALIGNED(start, PAGE_SIZE));
+	ASSERT(IS_ALIGNED(start, root->sectorsize));
 	ASSERT(len == PAGE_SIZE);
 
 	ASSERT(!!(BTRFS_I(inode)->flags & BTRFS_INODE_NODATACOW) == 1);
@@ -7728,10 +7840,12 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 	if (test_bit(EXTENT_FLAG_COMPRESSED, &em->flags) ||
 	    em->block_start == EXTENT_MAP_INLINE) {
 		ret = -EIO;	/* dio uses ENOTBLK. */
+		free_extent_map(em);
 		goto unlock_err;
 	}
 
 	if (!create && (em->block_start == EXTENT_MAP_HOLE || test_bit(EXTENT_FLAG_PREALLOC, &em->flags))) {
+		free_extent_map(em);
 		goto unlock_err;
 	}
 
@@ -7794,6 +7908,7 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 						     BTRFS_ORDERED_PREALLOC);
 			if (em_insert && IS_ERR(em_insert)) {
 				ret = PTR_ERR(em_insert);
+				free_extent_map(em);
 				btrfs_err(root->fs_info, "create_pinned_em error %d\n", ret);
 				btrfs_dec_nocow_writers(root->fs_info, block_start);
 				goto unlock_err;
@@ -7823,7 +7938,9 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 				btrfs_err(root->fs_info, "start_transaction error %d\n", ret);
 				btrfs_dec_nocow_writers(root->fs_info,
 							block_start);
-				free_extent_map(em_insert);
+				free_extent_map(em);
+				btrfs_drop_extent_cache(inode, start,
+							start + len - 1, 0);
 				goto unlock_err;	/* TODO: re-check this goto */
 			}
 #ifdef DAX_DEBUG
@@ -7853,7 +7970,9 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 				btrfs_dec_nocow_writers(root->fs_info,
 							block_start);
 				btrfs_end_transaction(trans, root);
-				free_extent_map(em_insert);
+				free_extent_map(em);
+				btrfs_drop_extent_cache(inode, start,
+							start + len - 1, 0);
 				goto unlock_err;
 			}
 #ifdef DAX_DEBUG
@@ -7874,7 +7993,9 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 				btrfs_err(root->fs_info, "update_inode error %d\n", ret);
 				btrfs_dec_nocow_writers(root->fs_info, block_start);
 				btrfs_end_transaction(trans, root);
-				free_extent_map(em_insert);
+				free_extent_map(em);
+				btrfs_drop_extent_cache(inode, start,
+							start + len - 1, 0);
 				goto unlock_err;
 			}
 #ifdef DAX_DEBUG
@@ -7886,6 +8007,33 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 
 			goto unlock;
 		}
+	}
+
+	/*
+	 * This is the hole case.
+	 * In this case, we'll
+	 * - reserve both data and meta
+	 * - allocate a new block
+	 * - insert file_extent_item
+	 * - update inode_item
+	 */
+	/*
+	 * TODO: what does it look like with NO_HOLE?
+	 * With NO_HOLE, there is not hole extents created by btrfs_cont_extent.
+	 */
+	ASSERT(em->block_start == EXTENT_MAP_HOLE);
+	if (em->block_start == EXTENT_MAP_HOLE) {
+		u64 alloc_hint;
+		struct btrfs_key ins;
+
+		ASSERT(len == bh_result->b_size);
+		free_extent_map(em);
+		em = btrfs_new_extent_dax(inode, start, len);
+		if (IS_ERR(em)) {
+			ret = PTR_ERR(em);
+			goto unlock_err;
+		}
+		ASSERT(em->len == len);
 	}
 
 unlock:
@@ -7928,6 +8076,8 @@ unlock:
 			 * without REQ_OP_DISCARD, stripe->length is not set,
 			 * thus use len instead.
 			 */
+
+			/* TODO: check whether zeroout actually works? */
 			ret = blkdev_issue_zeroout(stripe->dev->bdev,
 						   stripe->physical >> 9,
 						   len >> 9,
@@ -7957,10 +8107,11 @@ unlock:
 	 */
 	clear_buffer_new(bh_result);
 
+	free_extent_map(em);
+
 unlock_err:
 	ASSERT(lockstart < lockend);
 	unlock_extent_cached(&BTRFS_I(inode)->io_tree, lockstart, lockend, &cached_state, GFP_NOFS);
-	free_extent_map(em);
 
 #ifdef DAX_DEBUG
 	trace_printk("return ++ inode %llu start %llu len %llu i_size %d | return %d\n", btrfs_ino(inode), start, len, (int)inode->i_size, ret);
