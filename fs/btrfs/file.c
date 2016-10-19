@@ -2197,7 +2197,30 @@ static int btrfs_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 static int btrfs_filemap_pfn_mkwrite(struct vm_area_struct *vma,
 				     struct vm_fault *vmf)
 {
-	return 0;
+	struct inode *inode = file_inode(vma->vm_file);
+	struct super_block *sb = inode->i_sb;
+	loff_t size;
+	int ret;
+
+	sb_start_pagefault(sb);
+	file_update_time(vma->vm_file);
+
+	/*
+	 * TODO: How to serialise against truncate/hole punch similar to page_mkwrite?
+	 * ext2/4 has a mmap_sem.
+	 * We need to use the lock before calling truncate_page_cache()
+	 * in truncate/hole punch.
+	 */
+	//down_read(&BTRFS_I(inode)->mmap_sem);
+	size = (i_size_read(inode) + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	if (vmf->pgoff >= size)
+		ret = VM_FAULT_SIGBUS;
+	else
+		ret = dax_pfn_mkwrite(vma, vmf);
+	//up_read(&BTRFS_I(inode)->mmap_sem);
+
+	sb_end_pagefault(sb);
+	return ret;
 }
 
 static const struct vm_operations_struct btrfs_file_vm_ops = {

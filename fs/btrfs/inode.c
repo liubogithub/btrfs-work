@@ -43,6 +43,7 @@
 #include <linux/blkdev.h>
 #include <linux/posix_acl_xattr.h>
 #include <linux/uio.h>
+#include <linux/dax.h>
 #include "ctree.h"
 #include "disk-io.h"
 #include "transaction.h"
@@ -7726,6 +7727,11 @@ static noinline struct extent_map *btrfs_new_extent_dax(struct inode *inode,
 	trace_printk("inode %llu start %llu len %llu i_size %d ++ after creating em %llu %llu flags %d ret %d\n", btrfs_ino(inode), start, len, (int)inode->i_size, em->start, em->len, (int)em->flags, ret);
 #endif
 
+	/*
+	 * NOTE that btrfs_direct_IO abuses current->journal_info and
+	 * stores dio_data in it, but btrfs_join_transaction can return
+	 * current->journal_info as trans_handle, Urr.
+	 */
 	trans = btrfs_join_transaction(root);
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
@@ -7734,6 +7740,9 @@ static noinline struct extent_map *btrfs_new_extent_dax(struct inode *inode,
 	}
 	trans->block_rsv = &root->fs_info->delalloc_block_rsv;
 
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d ++ transid %llu running transid %llu\n", btrfs_ino(inode), start, len, (int)inode->i_size, trans->transid, root->fs_info->running_transaction->transid);
+#endif
 	ret = insert_reserved_file_extent(trans, inode,
 					  start, /* file_pos */
 					  ins.objectid, /* disk_bytenr */
@@ -7750,6 +7759,19 @@ static noinline struct extent_map *btrfs_new_extent_dax(struct inode *inode,
 #ifdef DAX_DEBUG
 	trace_printk("inode %llu start %llu len %llu i_size %d ++ after insert_reserved_file_extent and unpin ret %d\n", btrfs_ino(inode), start, len, (int)inode->i_size, ret);
 #endif
+
+	/*
+	 * update disk_i_size to update on-disk inode_item, update i_size so
+	 * that read can find data after unlocking extents.
+	 */
+	if (start + len > i_size_read(inode))
+		i_size_write(inode, start + len);
+
+	if (BTRFS_I(inode)->disk_i_size < i_size_read(inode)) {
+		u64 new_i_size;
+		new_i_size = min_t(u64, start + len, i_size_read(inode));
+		BTRFS_I(inode)->disk_i_size = new_i_size;
+	}
 
 	ret = btrfs_update_inode_fallback(trans, root, inode);
 #ifdef DAX_DEBUG
@@ -7794,10 +7816,11 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 	lockend = start + len - 1;
 
 	/* caller ensures that start < inode->i_size and b_size is PAGE_SIZE */
-	ASSERT(start < inode->i_size);
+	if (create == 0)
+		ASSERT(start < inode->i_size);
 	ASSERT(IS_ALIGNED(start, PAGE_SIZE));
 	ASSERT(IS_ALIGNED(start, root->sectorsize));
-	ASSERT(len == PAGE_SIZE);
+	ASSERT(len >= PAGE_SIZE);
 
 	ASSERT(!!(BTRFS_I(inode)->flags & BTRFS_INODE_NODATACOW) == 1);
 	ASSERT(!!(BTRFS_I(inode)->flags & BTRFS_INODE_NODATASUM) == 1);
@@ -7897,7 +7920,7 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 			 * minimum fallocate unit is PAGE_SIZE recorded in
 			 * root->sectorsize.
 			 */
-			ASSERT(len == PAGE_SIZE);
+			ASSERT(len >= PAGE_SIZE);
 
 			/* insert new extent map */
 			em_insert = create_pinned_em(inode, start, len,
@@ -9163,22 +9186,25 @@ static ssize_t btrfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 			inode_unlock(inode);
 			relock = true;
 		}
-		ret = btrfs_delalloc_reserve_space(inode, offset, count);
-		if (ret)
-			goto out;
-		dio_data.outstanding_extents = div64_u64(count +
-						BTRFS_MAX_EXTENT_SIZE - 1,
-						BTRFS_MAX_EXTENT_SIZE);
+		if (!IS_DAX(inode)) {
+			ret = btrfs_delalloc_reserve_space(inode, offset, count);
+			if (ret)
+				goto out;
 
-		/*
-		 * We need to know how many extents we reserved so that we can
-		 * do the accounting properly if we go over the number we
-		 * originally calculated.  Abuse current->journal_info for this.
-		 */
-		dio_data.reserve = round_up(count, root->sectorsize);
-		dio_data.unsubmitted_oe_range_start = (u64)offset;
-		dio_data.unsubmitted_oe_range_end = (u64)offset;
-		current->journal_info = &dio_data;
+			dio_data.outstanding_extents = div64_u64(count +
+							BTRFS_MAX_EXTENT_SIZE - 1,
+							BTRFS_MAX_EXTENT_SIZE);
+
+			/*
+			 * We need to know how many extents we reserved so that we can
+			 * do the accounting properly if we go over the number we
+			 * originally calculated.  Abuse current->journal_info for this.
+			 */
+			dio_data.reserve = round_up(count, root->sectorsize);
+			dio_data.unsubmitted_oe_range_start = (u64)offset;
+			dio_data.unsubmitted_oe_range_end = (u64)offset;
+			current->journal_info = &dio_data;
+		}
 	} else if (test_bit(BTRFS_INODE_READDIO_NEED_LOCK,
 				     &BTRFS_I(inode)->runtime_flags)) {
 		inode_dio_end(inode);
@@ -9186,10 +9212,19 @@ static ssize_t btrfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 		wakeup = false;
 	}
 
-	ret = __blockdev_direct_IO(iocb, inode,
-				   BTRFS_I(inode)->root->fs_info->fs_devices->latest_bdev,
-				   iter, btrfs_get_blocks_direct, NULL,
-				   btrfs_submit_direct, flags);
+	if (IS_DAX(inode)) {
+		/*
+		 * For simplicity, use DIO path instead of iomap because DIO
+		 * path takes one blocks each time so we can use
+		 * btrfs_get_blocks_dax_fault.
+		 */
+		ret = dax_do_io(iocb, inode, iter, btrfs_get_blocks_dax_fault, NULL, flags);
+	} else {
+		ret = __blockdev_direct_IO(iocb, inode,
+					   BTRFS_I(inode)->root->fs_info->fs_devices->latest_bdev,
+					   iter, btrfs_get_blocks_direct, NULL,
+					   btrfs_submit_direct, flags);
+	}
 	if (iov_iter_rw(iter) == WRITE) {
 		current->journal_info = NULL;
 		if (ret < 0 && ret != -EIOCBQUEUED) {
