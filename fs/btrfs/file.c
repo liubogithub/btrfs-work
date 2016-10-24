@@ -1848,7 +1848,7 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 	count = iov_iter_count(from);
 	start_pos = round_down(pos, root->sectorsize);
 	oldsize = i_size_read(inode);
-	if (start_pos > oldsize) {
+	if (pos > oldsize) {
 		/* Expand hole size to cover write data, preventing empty gap */
 		end_pos = round_up(pos + count, root->sectorsize);
 		err = btrfs_cont_expand(inode, oldsize, end_pos);
