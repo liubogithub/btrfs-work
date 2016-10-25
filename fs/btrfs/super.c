@@ -411,6 +411,7 @@ int btrfs_parse_options(struct btrfs_root *root, char *options,
 	enum btrfs_compression_type saved_compress_type;
 	bool saved_compress_force;
 	int no_compress = 0;
+	int set_bdev = 0;
 
 	cache_gen = btrfs_super_cache_generation(root->fs_info->super_copy);
 	if (btrfs_fs_compat_ro(root->fs_info, FREE_SPACE_TREE))
@@ -473,6 +474,22 @@ int btrfs_parse_options(struct btrfs_root *root, char *options,
 			break;
 		case Opt_dax:
 			btrfs_set_and_info(info, DAX, "setting dax");
+			/*
+			 * sb->s_blocksize is set to root->sectorsize
+			 * sb->s_bdev is required, but btrfs doesn't set it
+			 * because of mutli-device, so here we set it
+			 * temporarily.
+			 * We allows only one device in dax case.
+			 */
+			if (!info->sb->s_bdev) {
+				info->sb->s_bdev = info->fs_devices->latest_bdev;
+				set_bdev = 1;
+			}
+			ret = bdev_dax_supported(info->sb, info->sb->s_blocksize);
+			if (set_bdev)
+				info->sb->s_bdev = NULL;
+			if (ret)
+				goto out;
 		case Opt_nodatacow:
 			if (!btrfs_test_opt(info, NODATACOW)) {
 				if (!btrfs_test_opt(info, COMPRESS) ||
