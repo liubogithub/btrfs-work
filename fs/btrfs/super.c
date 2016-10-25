@@ -490,6 +490,12 @@ int btrfs_parse_options(struct btrfs_root *root, char *options,
 				info->sb->s_bdev = NULL;
 			if (ret)
 				goto out;
+
+			/*
+			 * dax inode doesn't need inline.
+			 */
+			info->max_inline = 1;
+			btrfs_info(root->fs_info, "max_inline at %llu", info->max_inline);
 		case Opt_nodatacow:
 			if (!btrfs_test_opt(info, NODATACOW)) {
 				if (!btrfs_test_opt(info, COMPRESS) ||
