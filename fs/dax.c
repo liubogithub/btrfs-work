@@ -172,7 +172,7 @@ static ssize_t dax_io(struct inode *inode, struct iov_iter *iter,
 			long size;
 
 			if (pos == bh_max) {
-				bh->b_size = PAGE_ALIGN(end - pos);
+				bh->b_size = PAGE_ALIGN(end - (pos - first));
 				bh->b_state = 0;
 				rc = get_block(inode, block, bh, rw == WRITE);
 				if (rc)
