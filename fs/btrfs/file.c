@@ -2443,19 +2443,6 @@ static int btrfs_punch_hole(struct inode *inode, loff_t offset, loff_t len)
 		goto out_only_mutex;
 	}
 
-	/*
-	 * Force upcoming unlocked DIO read to take inode_lock.
-	 */
-	btrfs_inode_block_unlock_dio(inode);
-
-	/*
-	 * Wait for pending DIO in order to avoid race against unlocked DIO
-	 * read/write.
-	 * After this, since we've got inode_lock, any upcoming DIO write
-	 * will wait till we release inode_lock.
-	 */
-	inode_dio_wait(inode);
-
 	lockstart = round_up(offset, BTRFS_I(inode)->root->sectorsize);
 	lockend = round_down(offset + len,
 			     BTRFS_I(inode)->root->sectorsize) - 1;
@@ -2716,7 +2703,6 @@ out_only_mutex:
 			ret = btrfs_end_transaction(trans, root);
 		}
 	}
-	btrfs_inode_resume_unlock_dio(inode);
 	inode_unlock(inode);
 	if (ret && !err)
 		err = ret;
