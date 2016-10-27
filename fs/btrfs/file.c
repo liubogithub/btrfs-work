@@ -2167,11 +2167,13 @@ static int btrfs_filemap_page_mkwrite(struct vm_area_struct *vma,
 	sb_start_pagefault(inode->i_sb);
 	file_update_time(vma->vm_file);
 
+	down_read(&BTRFS_I(inode)->mmap_sem);
 	if (IS_DAX(inode)) {
 		ret = dax_mkwrite(vma, vmf, btrfs_get_blocks_dax_fault);
 	} else {
 		ret = btrfs_page_mkwrite(vma, vmf);
 	}
+	up_read(&BTRFS_I(inode)->mmap_sem);
 
 	sb_end_pagefault(inode->i_sb);
 	return ret;
@@ -2185,11 +2187,13 @@ static int btrfs_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	if ((vmf->flags & FAULT_FLAG_WRITE) && IS_DAX(inode))
 		return btrfs_filemap_page_mkwrite(vma, vmf);
 
+	down_read(&BTRFS_I(inode)->mmap_sem);
 	if (IS_DAX(inode)) {
 		ret = dax_fault(vma, vmf, btrfs_get_blocks_dax_fault);
 	} else {
 		ret = filemap_fault(vma, vmf);
 	}
+	up_read(&BTRFS_I(inode)->mmap_sem);
 
 	return ret;
 }
@@ -2200,24 +2204,24 @@ static int btrfs_filemap_pfn_mkwrite(struct vm_area_struct *vma,
 	struct inode *inode = file_inode(vma->vm_file);
 	struct super_block *sb = inode->i_sb;
 	loff_t size;
-	int ret;
+	int ret = VM_FAULT_NOPAGE;
 
 	sb_start_pagefault(sb);
 	file_update_time(vma->vm_file);
 
 	/*
-	 * TODO: How to serialise against truncate/hole punch similar to page_mkwrite?
-	 * ext2/4 has a mmap_sem.
-	 * We need to use the lock before calling truncate_page_cache()
-	 * in truncate/hole punch.
+	 * How to serialise against truncate/hole punch similar to page_mkwrite?
+	 * For truncate, we firstly update isize and then truncate pagecache in
+	 * order to avoid race against page fault.
+	 * For punch_hole, we use lock_extent and truncate pagecache.
 	 */
-	//down_read(&BTRFS_I(inode)->mmap_sem);
+	down_read(&BTRFS_I(inode)->mmap_sem);
 	size = (i_size_read(inode) + PAGE_SIZE - 1) >> PAGE_SHIFT;
 	if (vmf->pgoff >= size)
 		ret = VM_FAULT_SIGBUS;
 	else
 		ret = dax_pfn_mkwrite(vma, vmf);
-	//up_read(&BTRFS_I(inode)->mmap_sem);
+	up_read(&BTRFS_I(inode)->mmap_sem);
 
 	sb_end_pagefault(sb);
 	return ret;
@@ -2448,6 +2452,13 @@ static int btrfs_punch_hole(struct inode *inode, loff_t offset, loff_t len)
 			     BTRFS_I(inode)->root->sectorsize) - 1;
 	same_block = (BTRFS_BYTES_TO_BLKS(root->fs_info, offset))
 		== (BTRFS_BYTES_TO_BLKS(root->fs_info, offset + len - 1));
+
+	/*
+	 * Prevent page faults from reinstantiating pages we have released
+	 * from page cache.
+	 */
+	down_write(&BTRFS_I(inode)->mmap_sem);
+
 	/*
 	 * We needn't truncate any block which is beyond the end of the file
 	 * because we are sure there is no data there.
@@ -2463,17 +2474,15 @@ static int btrfs_punch_hole(struct inode *inode, loff_t offset, loff_t len)
 		} else {
 			ret = 0;
 		}
-		goto out_only_mutex;
+		goto out_mmap;
 	}
 
 	/* zero back part of the first block */
 	if (offset < ino_size) {
 		truncated_block = true;
 		ret = btrfs_truncate_block(inode, offset, 0, 0);
-		if (ret) {
-			inode_unlock(inode);
-			return ret;
-		}
+		if (ret)
+			goto out_mmap;
 	}
 
 	/* Check the aligned pages after the first unaligned page,
@@ -2486,10 +2495,10 @@ static int btrfs_punch_hole(struct inode *inode, loff_t offset, loff_t len)
 		offset = lockstart;
 		ret = find_first_non_hole(inode, &offset, &len);
 		if (ret < 0)
-			goto out_only_mutex;
+			goto out_mmap;
 		if (ret && !len) {
 			ret = 0;
-			goto out_only_mutex;
+			goto out_mmap;
 		}
 		lockstart = offset;
 	}
@@ -2500,7 +2509,7 @@ static int btrfs_punch_hole(struct inode *inode, loff_t offset, loff_t len)
 	if (tail_len) {
 		ret = find_first_non_hole(inode, &tail_start, &tail_len);
 		if (unlikely(ret < 0))
-			goto out_only_mutex;
+			goto out_mmap;
 		if (!ret) {
 			/* zero the front end of the last page */
 			if (tail_start + tail_len < ino_size) {
@@ -2509,14 +2518,14 @@ static int btrfs_punch_hole(struct inode *inode, loff_t offset, loff_t len)
 							tail_start + tail_len,
 							0, 1);
 				if (ret)
-					goto out_only_mutex;
+					goto out_mmap;
 			}
 		}
 	}
 
 	if (lockend < lockstart) {
 		ret = 0;
-		goto out_only_mutex;
+		goto out_mmap;
 	}
 
 	while (1) {
@@ -2686,6 +2695,8 @@ out_free:
 out:
 	unlock_extent_cached(&BTRFS_I(inode)->io_tree, lockstart, lockend,
 			     &cached_state, GFP_NOFS);
+out_mmap:
+	up_write(&BTRFS_I(inode)->mmap_sem);
 out_only_mutex:
 	if (!updated_inode && truncated_block && !ret && !err) {
 		/*

@@ -195,6 +195,13 @@ struct btrfs_inode {
 	 */
 	struct rw_semaphore dio_sem;
 
+	/*
+	 * To serialise page fault with truncate/punch_hole operations.
+	 * We have to make sure that new page cannot be faulted in a section
+	 * of the inode that is being punched.
+	 */
+	struct rw_semaphore mmap_sem;
+
 	struct inode vfs_inode;
 };
 
