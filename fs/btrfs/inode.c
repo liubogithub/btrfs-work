@@ -8108,6 +8108,13 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 			btrfs_end_transaction(trans, root);
 
 			goto unlock;
+		} else {
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu start %llu len %llu i_size %d | having snapshot\n", btrfs_ino(inode), start, len, (int)inode->i_size);
+#endif
+			ret = -EIO;
+			btrfs_err_rl(root->fs_info, "Ooops, dax inode %llu has shared extent!\n", btrfs_ino(inode));
+			goto unlock;
 		}
 	}
 
