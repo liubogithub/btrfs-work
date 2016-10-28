@@ -7840,26 +7840,22 @@ static noinline int btrfs_end_io_dax_fault(struct kiocb *iocb, loff_t offset,
 	if (offset + size > i_size_read(inode))
 		i_size_write(inode, offset + size);
 
-	ret = btrfs_ordered_update_i_size(inode, offset + size, NULL);
 	/* ret == 0: disk_i_size has been changed */
-	if (!ret) {
-		trans = btrfs_start_transaction(root, 1);
-		if (IS_ERR(trans))
-			return PTR_ERR(trans);
+	ret = btrfs_ordered_update_i_size(inode, offset + size, NULL);
+	/*
+	 * We need to update inode no matter i_size has been changed as inode
+	 * fileds e.g. nbytes may have been changed.
+	 */
+	trans = btrfs_start_transaction(root, 1);
+	if (IS_ERR(trans))
+		return PTR_ERR(trans);
 
-		ret = btrfs_update_inode_fallback(trans, root, inode);
+	ret = btrfs_update_inode_fallback(trans, root, inode);
 
-		btrfs_end_transaction(trans, root);
+	btrfs_end_transaction(trans, root);
 #ifdef DAX_DEBUG
 	trace_printk("inode %llu start %llu len %llu i_size %d after_update_inode ret %d\n", btrfs_ino(inode), offset, size, (int)inode->i_size, ret);
 #endif
-	} else {
-		/*
-		 * We need to set this since non-zero ret can be treated as
-		 * error.
-		 */
-		ret = 0;
-	}
 
 	return ret;
 }
