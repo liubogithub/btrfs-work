@@ -1748,7 +1748,11 @@ static ssize_t __btrfs_direct_write(struct kiocb *iocb, struct iov_iter *from)
 
 	written = generic_file_direct_write(iocb, from);
 
-	if (written < 0 || !iov_iter_count(from))
+	/*
+	 * For dax files, a buffered write will not succeed.
+	 * clear_page_for_io would complain about !PAGE_LOCKED
+	 */
+	if (written < 0 || !iov_iter_count(from) || IS_DAX(inode))
 		return written;
 
 	pos += written;
