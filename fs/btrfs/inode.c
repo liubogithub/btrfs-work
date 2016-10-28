@@ -7687,7 +7687,7 @@ static void adjust_dio_outstanding_extents(struct inode *inode,
 	 * within our reservation, otherwise we need to adjust our inode
 	 * counter appropriately.
 	 */
-	if (dio_data->outstanding_extents) {
+	if (dio_data && dio_data->outstanding_extents) {
 		dio_data->outstanding_extents -= num_extents;
 	} else {
 		spin_lock(&BTRFS_I(inode)->lock);
@@ -7745,7 +7745,22 @@ static noinline struct extent_map *btrfs_new_extent_dax(struct inode *inode,
 	trace_printk("inode %llu start %llu len %llu i_size %d ++ after reserve_extent alloc_hint %llu ins %llu %llu ret %d\n", btrfs_ino(inode), start, len, (int)inode->i_size, alloc_hint, ins.objectid, ins.offset, ret);
 #endif
 
-	ASSERT(len == ins.offset);
+	ASSERT(len >= ins.offset);
+	if (len != ins.offset) {
+		btrfs_delalloc_release_space(inode, start, len - ins.offset);
+
+		/*
+		 * compensate the delalloc release when we write less than
+		 * expected, so that we don't underflow ->outstanding_extent
+		 */
+		adjust_dio_outstanding_extents(inode, NULL, len - ins.offset);
+
+		len = min_t(u64, len, ins.offset);
+#ifdef DAX_DEBUG
+		trace_printk("inode %llu start %llu len %llu i_size %d +++ len REDUCED! len %llu ins %llu %llu\n", btrfs_ino(inode), start, len, (int)inode->i_size, len, ins.objectid, ins.offset);
+#endif
+	}
+
 	em = create_pinned_em(inode, start, len, start, ins.objectid,
 			      len, len, len, 0);
 	if (IS_ERR(em)) {
@@ -7798,7 +7813,7 @@ out:
 	if (trans)
 		btrfs_end_transaction(trans, root);
 
-	if (ret) {
+	if (ret && em) {
 		free_extent_map(em);
 		btrfs_drop_extent_cache(inode, start, start + len - 1, 0);
 	}
@@ -8158,7 +8173,7 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 			ret = PTR_ERR(em);
 			goto unlock_err;
 		}
-		ASSERT(em->len == len);
+		len = min_t(u64, len, em->len - (start - em->start));
 	}
 
 unlock:
@@ -9331,7 +9346,12 @@ static ssize_t btrfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 					   iter, btrfs_get_blocks_direct, NULL,
 					   btrfs_submit_direct, flags);
 	}
-	if (iov_iter_rw(iter) == WRITE) {
+	/*
+	 * ugly hack for dax inode for now.
+	 * dax inode has done reserve/release stuff inside
+	 * btrfs_get_blocks_dax_fault, we may change it in future.
+	 */
+	if (iov_iter_rw(iter) == WRITE && !IS_DAX(inode)) {
 		current->journal_info = NULL;
 		if (ret < 0 && ret != -EIOCBQUEUED) {
 			if (dio_data.reserve)
