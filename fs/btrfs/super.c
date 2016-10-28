@@ -496,6 +496,14 @@ int btrfs_parse_options(struct btrfs_root *root, char *options,
 			 */
 			info->max_inline = 1;
 			btrfs_info(root->fs_info, "max_inline at %llu", info->max_inline);
+
+			btrfs_clear_opt(info->mount_opt, COMPRESS);
+			btrfs_clear_opt(info->mount_opt, FORCE_COMPRESS);
+			btrfs_set_opt(info->mount_opt, NODATACOW);
+			btrfs_set_opt(info->mount_opt, NODATASUM);
+			btrfs_info(root->fs_info,
+				   "setting nodatacow, compression disabled");
+			goto out;
 		case Opt_nodatacow:
 			if (!btrfs_test_opt(info, NODATACOW)) {
 				if (!btrfs_test_opt(info, COMPRESS) ||
