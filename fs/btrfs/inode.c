@@ -7987,6 +7987,7 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 		/* prealloc minimum size is blocksize */
 		len = min(len, em->len - (start - em->start));
 		block_start = em->block_start + (start - em->start);
+		ASSERT(IS_ALIGNED(len, PAGE_SIZE));
 		ASSERT(len >= PAGE_SIZE);
 
 		if (can_nocow_extent(inode, start, &len, &orig_start,
@@ -8004,6 +8005,7 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 			 * minimum fallocate unit is PAGE_SIZE recorded in
 			 * root->sectorsize.
 			 */
+			ASSERT(IS_ALIGNED(len, PAGE_SIZE));
 			ASSERT(len >= PAGE_SIZE);
 
 			/*
@@ -8048,7 +8050,7 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 							     BTRFS_ORDERED_PREALLOC);
 				if (em_insert && IS_ERR(em_insert)) {
 					ret = PTR_ERR(em_insert);
-					btrfs_err(root->fs_info, "create_pinned_em error %d\n", ret);
+					btrfs_err_rl(root->fs_info, "create_pinned_em error %d\n", ret);
 					btrfs_end_transaction(trans, root);
 					btrfs_dec_nocow_writers(root->fs_info, block_start);
 					free_extent_map(em);
@@ -8147,7 +8149,6 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 	 */
 	ASSERT(em->block_start == EXTENT_MAP_HOLE);
 	if (em->block_start == EXTENT_MAP_HOLE) {
-		u64 end;
 
 		ASSERT(len == bh_result->b_size);
 		/*
@@ -8159,13 +8160,21 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 		 *
 		 * The above can happen because DAX io can be unaligned to
 		 * blocksize, so be careful to not zero out the existing
-		 * block that (start+len) belongs to.
+		 * block that (start+len) belongs to because it can end up
+		 * _data loss of the existing block_.
 		 * Note that (start + len) here is aligned but the actual
 		 * (start + len) of IO may not.
 		 */
-		end = min_t(u64, em->start + em->len, start + len);
-		len = end - start;
-		ASSERT(ALIGN(len, PAGE_SIZE));
+		len = min_t(u64, extent_map_end(em) - start, len);
+
+		/*
+		 * em->len may NOT be AGIGN to PAGE_SIZE/sectorsize if a hole
+		 * extent was created by find_first_non_hole in
+		 * btrfs_punch_hole.
+		 */
+		len = ALIGN(len, root->sectorsize);
+
+		ASSERT(IS_ALIGNED(len, PAGE_SIZE));
 		free_extent_map(em);
 
 		em = btrfs_new_extent_dax(inode, start, len);
@@ -8174,6 +8183,7 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 			goto unlock_err;
 		}
 		len = min_t(u64, len, em->len - (start - em->start));
+		ASSERT(IS_ALIGNED(len, PAGE_SIZE));
 	}
 
 unlock:
