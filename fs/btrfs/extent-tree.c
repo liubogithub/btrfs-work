@@ -6130,12 +6130,15 @@ void btrfs_delalloc_release_metadata(struct inode *inode, u64 num_bytes)
  */
 int btrfs_delalloc_reserve_space(struct inode *inode, u64 start, u64 len)
 {
+	struct btrfs_root *root = BTRFS_I(inode)->root;
+	u64 aligned_len = round_up(start + len, root->sectorsize) -
+			  round_down(start, root->sectorsize);
 	int ret;
 
 	ret = btrfs_check_data_free_space(inode, start, len);
 	if (ret < 0)
 		return ret;
-	ret = btrfs_delalloc_reserve_metadata(inode, len);
+	ret = btrfs_delalloc_reserve_metadata(inode, aligned_len);
 	if (ret < 0)
 		btrfs_free_reserved_data_space(inode, start, len);
 	return ret;
@@ -6158,7 +6161,11 @@ int btrfs_delalloc_reserve_space(struct inode *inode, u64 start, u64 len)
  */
 void btrfs_delalloc_release_space(struct inode *inode, u64 start, u64 len)
 {
-	btrfs_delalloc_release_metadata(inode, len);
+	struct btrfs_root *root = BTRFS_I(inode)->root;
+	u64 aligned_len = round_up(start + len, root->sectorsize) -
+			  round_down(start, root->sectorsize);
+
+	btrfs_delalloc_release_metadata(inode, aligned_len);
 	btrfs_free_reserved_data_space(inode, start, len);
 }
 
