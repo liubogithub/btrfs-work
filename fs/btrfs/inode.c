@@ -9285,6 +9285,7 @@ static ssize_t btrfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	int flags = 0;
 	bool wakeup = true;
 	bool relock = false;
+	int write = !!(iov_iter_rw(iter) == WRITE);
 	ssize_t ret;
 
 	if (check_direct_IO(BTRFS_I(inode)->root, iocb, iter, offset))
@@ -9305,12 +9306,13 @@ static ssize_t btrfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 		filemap_fdatawrite_range(inode->i_mapping, offset,
 					 offset + count - 1);
 
-	reserved_bytes = round_up(offset + count, root->sectorsize) -
-			 round_down(offset, root->sectorsize);
-	if (!IS_DAX(inode))
-		ASSERT(reserved_bytes == count);
+	if (write) {
+		reserved_bytes = round_up(offset + count, root->sectorsize) -
+				 round_down(offset, root->sectorsize);
+		if (!IS_DAX(inode))
+			ASSERT(reserved_bytes == count);
 
-	if (iov_iter_rw(iter) == WRITE) {
+
 		/*
 		 * If the write DIO is beyond the EOF, we need update
 		 * the isize, but it is protected by i_mutex. So we can
@@ -9351,14 +9353,14 @@ static ssize_t btrfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 		 * path takes one blocks each time so we can use
 		 * btrfs_get_blocks_dax_fault.
 		 */
-		ret = dax_do_io(iocb, inode, iter, btrfs_get_blocks_dax_fault, btrfs_end_io_dax_fault, flags);
+		ret = dax_do_io(iocb, inode, iter, btrfs_get_blocks_dax_fault, write ? btrfs_end_io_dax_fault : NULL, flags);
 	} else {
 		ret = __blockdev_direct_IO(iocb, inode,
 					   BTRFS_I(inode)->root->fs_info->fs_devices->latest_bdev,
 					   iter, btrfs_get_blocks_direct, NULL,
 					   btrfs_submit_direct, flags);
 	}
-	if (iov_iter_rw(iter) == WRITE) {
+	if (write) {
 		current->journal_info = NULL;
 		if (ret < 0 && ret != -EIOCBQUEUED) {
 			if (dio_data.reserve)
