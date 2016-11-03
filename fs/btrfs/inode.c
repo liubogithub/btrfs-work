@@ -8252,7 +8252,8 @@ unlock_err:
 		 * Since we don't use ordered extent, no need to care about
 		 * outstanding extents.
 		 */
-		//adjust_dio_outstanding_extents(inode, dio_data, len);
+		if (ret)
+			adjust_dio_outstanding_extents(inode, dio_data, len);
 		current->journal_info = dio_data;
 	}
 
