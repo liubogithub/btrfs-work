@@ -9658,7 +9658,6 @@ int btrfs_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 
 	ret = VM_FAULT_NOPAGE; /* make the VM retry the fault */
 
-	down_read(&BTRFS_I(inode)->mmap_sem);
 again:
 	lock_page(page);
 	size = i_size_read(inode);
@@ -9748,7 +9747,6 @@ out_unlock:
 		return VM_FAULT_LOCKED;
 	}
 	unlock_page(page);
-	up_read(&BTRFS_I(inode)->mmap_sem);
 out:
 	btrfs_delalloc_release_space(inode, page_start, reserved_space);
 out_noreserve:
