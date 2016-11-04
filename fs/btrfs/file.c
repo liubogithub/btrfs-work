@@ -2180,11 +2180,34 @@ static int btrfs_filemap_page_mkwrite(struct vm_area_struct *vma,
 
 	down_read(&BTRFS_I(inode)->mmap_sem);
 	if (IS_DAX(inode)) {
+		struct btrfs_dio_data dio_data = {0};
+		u64 offset = vmf->pgoff << PAGE_SHIFT;
+
+		ret = btrfs_delalloc_reserve_space(inode, offset, PAGE_SIZE);
+		if (ret) {
+			if (ret == -ENOMEM)
+				ret = VM_FAULT_OOM;
+			else
+				ret = VM_FAULT_SIGBUS;
+			goto out_unlock;
+		}
+
+		dio_data.outstanding_extents = 1;
+		dio_data.reserve = PAGE_SIZE;
+		current->journal_info = &dio_data;
+
 		ret = dax_mkwrite(vma, vmf, btrfs_get_blocks_dax_fault);
+		if (dio_data.reserve)
+			btrfs_delalloc_release_space(inode, offset, dio_data.reserve);
+		else
+			btrfs_delalloc_release_metadata(inode, PAGE_SIZE);
+
+		current->journal_info = NULL;
 	} else {
 		ret = btrfs_page_mkwrite(vma, vmf);
 	}
 
+out_unlock:
 	up_read(&BTRFS_I(inode)->mmap_sem);
 out:
 	sb_end_pagefault(inode->i_sb);

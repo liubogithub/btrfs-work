@@ -3081,6 +3081,13 @@ void btrfs_extent_item_to_extent_map(struct inode *inode,
 				     struct extent_map *em);
 
 /* inode.c */
+struct btrfs_dio_data {
+	u64 outstanding_extents;
+	u64 reserve;
+	u64 unsubmitted_oe_range_start;
+	u64 unsubmitted_oe_range_end;
+};
+
 struct btrfs_delalloc_work {
 	struct inode *inode;
 	int delay_iput;

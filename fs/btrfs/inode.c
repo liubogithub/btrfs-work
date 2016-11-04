@@ -71,13 +71,6 @@ struct btrfs_iget_args {
 	struct btrfs_root *root;
 };
 
-struct btrfs_dio_data {
-	u64 outstanding_extents;
-	u64 reserve;
-	u64 unsubmitted_oe_range_start;
-	u64 unsubmitted_oe_range_end;
-};
-
 static const struct inode_operations btrfs_dir_inode_operations;
 static const struct inode_operations btrfs_symlink_inode_operations;
 static const struct inode_operations btrfs_dir_ro_inode_operations;
@@ -7904,7 +7897,7 @@ noinline int btrfs_get_blocks_dax_fault(struct inode *inode, sector_t iblock,
 	 * If we find out another pointer that can be used to pass @dio_data for
 	 * reserved space information, change to use that immediately.
 	 */
-	if (current->journal_info) {
+	if (create && current->journal_info) {
 		dio_data = current->journal_info;
 		current->journal_info = NULL;
 	}
