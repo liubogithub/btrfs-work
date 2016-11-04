@@ -2169,7 +2169,14 @@ static int btrfs_filemap_page_mkwrite(struct vm_area_struct *vma,
 	int ret;
 
 	sb_start_pagefault(inode->i_sb);
-	file_update_time(vma->vm_file);
+	ret = file_update_time(vma->vm_file);
+	if (ret) {
+		if (ret == -ENOMEM)
+			ret = VM_FAULT_OOM;
+		else
+			ret = VM_FAULT_SIGBUS;
+		goto out;
+	}
 
 	down_read(&BTRFS_I(inode)->mmap_sem);
 	if (IS_DAX(inode)) {
@@ -2177,8 +2184,9 @@ static int btrfs_filemap_page_mkwrite(struct vm_area_struct *vma,
 	} else {
 		ret = btrfs_page_mkwrite(vma, vmf);
 	}
-	up_read(&BTRFS_I(inode)->mmap_sem);
 
+	up_read(&BTRFS_I(inode)->mmap_sem);
+out:
 	sb_end_pagefault(inode->i_sb);
 	return ret;
 }

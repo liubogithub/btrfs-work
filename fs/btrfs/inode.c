@@ -9620,7 +9620,6 @@ int btrfs_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 	unsigned long zero_start;
 	loff_t size;
 	int ret;
-	int reserved = 0;
 	u64 reserved_space;
 	u64 page_start;
 	u64 page_end;
@@ -9642,17 +9641,11 @@ int btrfs_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 	 */
 	ret = btrfs_delalloc_reserve_space(inode, page_start,
 					   reserved_space);
-	if (!ret) {
-		ret = file_update_time(vma->vm_file);
-		reserved = 1;
-	}
 	if (ret) {
 		if (ret == -ENOMEM)
 			ret = VM_FAULT_OOM;
 		else /* -ENOSPC, -EIO, etc */
 			ret = VM_FAULT_SIGBUS;
-		if (reserved)
-			goto out;
 		goto out_noreserve;
 	}
 
@@ -9747,7 +9740,6 @@ out_unlock:
 		return VM_FAULT_LOCKED;
 	}
 	unlock_page(page);
-out:
 	btrfs_delalloc_release_space(inode, page_start, reserved_space);
 out_noreserve:
 	return ret;
