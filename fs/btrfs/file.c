@@ -1867,7 +1867,49 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 	if (sync)
 		atomic_inc(&BTRFS_I(inode)->sync_writers);
 
-	if (iocb->ki_flags & IOCB_DIRECT) {
+	if (IS_DAX(inode)) {
+		num_written = iomap_dax_rw(iocb, from, &btrfs_iomap_ops);
+		if (num_written > 0 && iocb->ki_pos > i_size_read(inode)) {
+			struct btrfs_trans_handle *trans = NULL;
+			/*
+			 * liubo: iocb->ki_pos has been updated to new size in
+			 * iomap_dax_rw.
+			 */
+			i_size_write(inode, iocb->ki_pos);
+
+			/*
+			 * this'll update i_disksize accordingly.
+			 */
+			btrfs_ordered_update_i_size(inode, iocb->ki_pos, NULL);
+
+			trans = btrfs_start_transaction(root, 1);
+			if (IS_ERR(trans)) {
+				/* lets return error */
+				num_written = 0;
+				err = PTR_ERR(trans);
+				inode_unlock(inode);
+				goto out;
+			}
+			/*
+			 * do we need to ignore this @ret since the above write is
+			 * done successfully?
+			 */
+			err = btrfs_update_inode_fallback(trans, root, inode);
+			btrfs_end_transaction(trans, root);
+
+			if (err) {
+				/* lets return error */
+				num_written = 0;
+				inode_unlock(inode);
+				goto out;
+			}
+
+			/*
+			 * no pagecache involved, thus no need to call
+			 * pagecache_isize_extended
+			 */
+		}
+	} else if (iocb->ki_flags & IOCB_DIRECT) {
 		num_written = __btrfs_direct_write(iocb, from);
 	} else {
 		num_written = __btrfs_buffered_write(file, from, pos);
@@ -1896,6 +1938,41 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 out:
 	current->backing_dev_info = NULL;
 	return num_written ? num_written : err;
+}
+
+static noinline ssize_t btrfs_file_dax_read(struct kiocb *iocb, struct iov_iter *to)
+{
+	struct file *file = iocb->ki_filp;
+	ssize_t ret;
+
+	if (!iov_iter_count(to))
+		return 0;	/* skip atime */
+
+	ret = iomap_dax_rw(iocb, to, &btrfs_iomap_ops);
+
+	/*
+	 * update atime.
+	 */
+	file_accessed(file);
+
+	return ret;
+}
+
+static noinline ssize_t btrfs_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
+{
+	struct inode *inode = file_inode(iocb->ki_filp);
+	struct btrfs_root *root = BTRFS_I(inode)->root;
+	ssize_t ret;
+
+	if (test_bit(BTRFS_FS_STATE_ERROR, &root->fs_info->fs_state))
+		return -EROFS;
+
+	if (IS_DAX(inode)) {
+		ret = btrfs_file_dax_read(iocb, to);
+	} else {
+		ret = generic_file_read_iter(iocb, to);
+	}
+	return ret;
 }
 
 int btrfs_release_file(struct inode *inode, struct file *filp)
@@ -3102,7 +3179,7 @@ out:
 
 const struct file_operations btrfs_file_operations = {
 	.llseek		= btrfs_file_llseek,
-	.read_iter      = generic_file_read_iter,
+	.read_iter      = btrfs_file_read_iter,
 	.splice_read	= generic_file_splice_read,
 	.write_iter	= btrfs_file_write_iter,
 	.mmap		= btrfs_file_mmap,

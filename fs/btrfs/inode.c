@@ -11189,6 +11189,76 @@ out_inode:
 
 }
 
+// #ifdef CONFIG_FS_DAX
+static noinline int btrfs_file_iomap_begin(struct inode *inode, loff_t offset,
+					   loff_t length, unsigned flags,
+					   struct iomap *iomap)
+{
+	unsigned int blkbits = inode->i_blkbits;
+	sector_t first_block = offset >> blkbits;
+	struct buffer_head bh = { 0 };
+	int ret;
+
+	/* temporarily use bh, will move to use iomap directly */
+	{
+		/* prepare bh for the following get_block_t */
+		bh.b_state = 0;
+		bh.b_size = round_up(length, blkbits);
+	}
+
+	/*
+	 * so let's get rid of bh and use iomap instead in
+	 * btrfs_get_blocks_dax_fault in order to get more batch
+	 *
+	 * --- but for now let's keep bh for less error prone.
+	 */
+	ret = btrfs_get_blocks_dax_fault(inode, offset, &bh, flags & IOMAP_WRITE);
+	if (ret < 0)
+		return ret;
+
+	iomap->flags = 0;
+	iomap->bdev = bh.b_bdev;
+	/*
+	 * This is btrfs, I doubt we set inode->i_blkbits correctly since we use
+	 * root->sectorsize, need to check.
+	 * --- so btrfs_get_blocks_direct uses this, too, no problem I think.
+	 */
+	iomap->offset = (u64)first_block << blkbits;
+
+	/*
+	 * This is copied from ext2_iomap_begin.
+	 */
+	if (ret == 0) {
+		iomap->type = IOMAP_HOLE;
+		iomap->blkno = IOMAP_NULL_BLOCK;
+		iomap->length = 1 << blkbits; /* again, check blkbits */
+	} else {
+		iomap->type = IOMAP_MAPPED;
+		/* filesystem offset */
+		iomap->blkno = bh.b_blocknr << blkbits;
+		iomap->length = bh.b_size;
+		/* do we have other possibilities? */
+		/* xfs doesn't use this IOMAP_F_MERGED */
+		//iomap->flags |= IOMAP_F_MERGED;
+	}
+
+	return 0;
+}
+
+static noinline int btrfs_file_iomap_end(struct inode *inode, loff_t offset,
+					 loff_t length, ssize_t written,
+					 unsigned flags, struct iomap *iomap)
+{
+	return 0;
+}
+
+struct iomap_ops btrfs_iomap_ops = {
+	.iomap_begin		= btrfs_file_iomap_begin,
+	.iomap_end		= btrfs_file_iomap_end,
+};
+
+// #endif  /* CONFIG_FS_DAX */
+
 static const struct inode_operations btrfs_dir_inode_operations = {
 	.getattr	= btrfs_getattr,
 	.lookup		= btrfs_lookup,

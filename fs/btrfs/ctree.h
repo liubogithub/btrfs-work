@@ -38,6 +38,7 @@
 #include <linux/security.h>
 #include <linux/sizes.h>
 #include <linux/dynamic_debug.h>
+#include <linux/iomap.h>
 #include "extent_io.h"
 #include "extent_map.h"
 #include "async-thread.h"
@@ -3081,6 +3082,8 @@ void btrfs_extent_item_to_extent_map(struct inode *inode,
 				     struct extent_map *em);
 
 /* inode.c */
+extern struct iomap_ops btrfs_iomap_ops;
+
 struct btrfs_dio_data {
 	u64 outstanding_extents;
 	u64 reserve;
