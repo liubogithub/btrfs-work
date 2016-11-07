@@ -1871,6 +1871,10 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 		num_written = iomap_dax_rw(iocb, from, &btrfs_iomap_ops);
 		if (num_written > 0 && iocb->ki_pos > i_size_read(inode)) {
 			struct btrfs_trans_handle *trans = NULL;
+
+#ifdef DAX_DEBUG
+			trace_printk("inode %llu isize old %llu new %llu\n", btrfs_ino(inode), iocb->ki_pos, i_size_read(inode));
+#endif
 			/*
 			 * liubo: iocb->ki_pos has been updated to new size in
 			 * iomap_dax_rw.

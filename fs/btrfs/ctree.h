@@ -1353,6 +1353,10 @@ btrfs_should_fragment_free_space(struct btrfs_root *root,
 	       (btrfs_test_opt(root->fs_info, FRAGMENT_DATA) &&
 		block_group->flags &  BTRFS_BLOCK_GROUP_DATA);
 }
+
+#define DAX_DEBUG
+//#undef DAX_DEBUG
+
 #endif
 
 /*

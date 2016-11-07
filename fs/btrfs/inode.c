@@ -63,9 +63,6 @@
 #include "qgroup.h"
 #include "dedupe.h"
 
-#define DAX_DEBUG
-//#undef DAX_DEBUG
-
 struct btrfs_iget_args {
 	struct btrfs_key *location;
 	struct btrfs_root *root;
@@ -11199,6 +11196,10 @@ static noinline int btrfs_file_iomap_begin(struct inode *inode, loff_t offset,
 	struct buffer_head bh = { 0 };
 	int ret;
 
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu offset %llu length %llu flags %d\n", btrfs_ino(inode), offset, length, flags);
+#endif
+
 	/* temporarily use bh, will move to use iomap directly */
 	{
 		/* prepare bh for the following get_block_t */
@@ -11213,6 +11214,9 @@ static noinline int btrfs_file_iomap_begin(struct inode *inode, loff_t offset,
 	 * --- but for now let's keep bh for less error prone.
 	 */
 	ret = btrfs_get_blocks_dax_fault(inode, offset, &bh, flags & IOMAP_WRITE);
+#ifdef DAX_DEBUG
+	trace_printk("inode %llu offset %llu length %llu flags %d |get_block_t ++ ret %d offset %llu blocknr %llu size %llu\n", btrfs_ino(inode), offset, length, flags, ret, (u64)first_block << blkbits, (u64)bh.b_blocknr << blkbits, bh.b_size);
+#endif
 	if (ret < 0)
 		return ret;
 
