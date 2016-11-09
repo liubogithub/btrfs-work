@@ -1869,12 +1869,10 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 
 	if (IS_DAX(inode)) {
 		num_written = iomap_dax_rw(iocb, from, &btrfs_iomap_ops);
+		trace_printk("inode %llu num_written %d ki_pos %d isize %d\n", btrfs_ino(inode), num_written, iocb->ki_pos, i_size_read(inode));
 		if (num_written > 0 && iocb->ki_pos > i_size_read(inode)) {
 			struct btrfs_trans_handle *trans = NULL;
 
-#ifdef DAX_DEBUG
-			trace_printk("inode %llu isize old %llu new %llu\n", btrfs_ino(inode), iocb->ki_pos, i_size_read(inode));
-#endif
 			/*
 			 * liubo: iocb->ki_pos has been updated to new size in
 			 * iomap_dax_rw.
@@ -1907,6 +1905,9 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 				inode_unlock(inode);
 				goto out;
 			}
+#ifdef DAX_DEBUG
+			trace_printk("inode %llu isize old %llu new %llu\n", btrfs_ino(inode), i_size_read(inode), iocb->ki_pos);
+#endif
 
 			/*
 			 * no pagecache involved, thus no need to call
@@ -1952,7 +1953,9 @@ static noinline ssize_t btrfs_file_dax_read(struct kiocb *iocb, struct iov_iter 
 	if (!iov_iter_count(to))
 		return 0;	/* skip atime */
 
+	trace_printk("pos %d count %d\n", iocb->ki_pos, iov_iter_count(to));
 	ret = iomap_dax_rw(iocb, to, &btrfs_iomap_ops);
+	trace_printk("pos %d count %d done\n", iocb->ki_pos, iov_iter_count(to));
 
 	/*
 	 * update atime.
@@ -2261,29 +2264,7 @@ static int btrfs_filemap_page_mkwrite(struct vm_area_struct *vma,
 
 	down_read(&BTRFS_I(inode)->mmap_sem);
 	if (IS_DAX(inode)) {
-		struct btrfs_dio_data dio_data = {0};
-		u64 offset = vmf->pgoff << PAGE_SHIFT;
-
-		ret = btrfs_delalloc_reserve_space(inode, offset, PAGE_SIZE);
-		if (ret) {
-			if (ret == -ENOMEM)
-				ret = VM_FAULT_OOM;
-			else
-				ret = VM_FAULT_SIGBUS;
-			goto out_unlock;
-		}
-
-		dio_data.outstanding_extents = 1;
-		dio_data.reserve = PAGE_SIZE;
-		current->journal_info = &dio_data;
-
-		ret = dax_mkwrite(vma, vmf, btrfs_get_blocks_dax_fault);
-		if (dio_data.reserve)
-			btrfs_delalloc_release_space(inode, offset, dio_data.reserve);
-		else
-			btrfs_delalloc_release_metadata(inode, PAGE_SIZE);
-
-		current->journal_info = NULL;
+		ret = iomap_dax_fault(vma, vmf, &btrfs_iomap_ops);
 	} else {
 		ret = btrfs_page_mkwrite(vma, vmf);
 	}
@@ -2305,7 +2286,7 @@ static int btrfs_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 
 	down_read(&BTRFS_I(inode)->mmap_sem);
 	if (IS_DAX(inode)) {
-		ret = dax_fault(vma, vmf, btrfs_get_blocks_dax_fault);
+		ret = iomap_dax_fault(vma, vmf, &btrfs_iomap_ops);
 	} else {
 		ret = filemap_fault(vma, vmf);
 	}

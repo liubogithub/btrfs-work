@@ -1276,6 +1276,7 @@ iomap_dax_actor(struct inode *inode, loff_t pos, loff_t length, void *data,
 		dax.size = (length + offset + PAGE_SIZE - 1) & PAGE_MASK;
 		map_len = dax_map_atomic(iomap->bdev, &dax);
 		if (map_len < 0) {
+			trace_printk("inode %llu pos %llu length %llu iomap %llu %llu %llu map_len %d \n", inode->i_ino, offset, length, iomap->offset, iomap->blkno, iomap->length, map_len);
 			ret = map_len;
 			break;
 		}
@@ -1292,6 +1293,7 @@ iomap_dax_actor(struct inode *inode, loff_t pos, loff_t length, void *data,
 		dax_unmap_atomic(iomap->bdev, &dax);
 		if (map_len <= 0) {
 			ret = map_len ? map_len : -EFAULT;
+			trace_printk("inode %llu offset %llu length %llu iomap %llu %llu %llu map_len %llu \n", inode->i_ino, offset, length, iomap->offset, iomap->blkno, iomap->length, map_len);
 			break;
 		}
 
