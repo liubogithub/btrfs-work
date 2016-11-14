@@ -323,7 +323,7 @@ enum {
 	Opt_commit_interval, Opt_barrier, Opt_nodefrag, Opt_nodiscard,
 	Opt_noenospc_debug, Opt_noflushoncommit, Opt_acl, Opt_datacow,
 	Opt_datasum, Opt_treelog, Opt_noinode_cache, Opt_usebackuproot,
-	Opt_nologreplay, Opt_norecovery,
+	Opt_nologreplay, Opt_norecovery, Opt_dax,
 #ifdef CONFIG_BTRFS_DEBUG
 	Opt_fragment_data, Opt_fragment_metadata, Opt_fragment_all,
 #endif
@@ -383,6 +383,7 @@ static const match_table_t tokens = {
 	{Opt_rescan_uuid_tree, "rescan_uuid_tree"},
 	{Opt_fatal_errors, "fatal_errors=%s"},
 	{Opt_commit_interval, "commit=%d"},
+	{Opt_dax, "dax"},
 #ifdef CONFIG_BTRFS_DEBUG
 	{Opt_fragment_data, "fragment=data"},
 	{Opt_fragment_metadata, "fragment=metadata"},
@@ -410,6 +411,7 @@ int btrfs_parse_options(struct btrfs_root *root, char *options,
 	enum btrfs_compression_type saved_compress_type;
 	bool saved_compress_force;
 	int no_compress = 0;
+	int set_bdev = 0;
 
 	cache_gen = btrfs_super_cache_generation(root->fs_info->super_copy);
 	if (btrfs_fs_compat_ro(root->fs_info, FREE_SPACE_TREE))
@@ -470,6 +472,40 @@ int btrfs_parse_options(struct btrfs_root *root, char *options,
 			btrfs_clear_opt(info->mount_opt, NODATACOW);
 			btrfs_clear_opt(info->mount_opt, NODATASUM);
 			break;
+#ifdef CONFIG_FS_DAX
+		case Opt_dax:
+			btrfs_set_and_info(info, DAX, "setting dax");
+			/*
+			 * sb->s_blocksize is set to root->sectorsize
+			 * sb->s_bdev is required, but btrfs doesn't set it
+			 * because of multi-device, so here we set it
+			 * temporarily.
+			 * We allows only one device in dax case.
+			 */
+			if (!info->sb->s_bdev) {
+				info->sb->s_bdev = info->fs_devices->latest_bdev;
+				set_bdev = 1;
+			}
+			ret = bdev_dax_supported(info->sb, info->sb->s_blocksize);
+			if (set_bdev)
+				info->sb->s_bdev = NULL;
+			if (ret)
+				goto out;
+
+			/* dax inode doesn't need inline. */
+			info->max_inline = 0;
+			btrfs_info(info, "max_inline at %llu", info->max_inline);
+
+			btrfs_clear_opt(info->mount_opt, COMPRESS);
+			btrfs_clear_opt(info->mount_opt, FORCE_COMPRESS);
+			btrfs_set_opt(info->mount_opt, NODATACOW);
+			btrfs_set_opt(info->mount_opt, NODATASUM);
+			btrfs_info(info,
+				   "setting nodatacow, compression disabled");
+
+			/* dax doesn't expect other fancy options. */
+			goto out;
+#endif
 		case Opt_nodatacow:
 			if (!btrfs_test_opt(info, NODATACOW)) {
 				if (!btrfs_test_opt(info, COMPRESS) ||
@@ -1232,6 +1268,8 @@ static int btrfs_show_options(struct seq_file *seq, struct dentry *dentry)
 		seq_puts(seq, ",nodatasum");
 	if (btrfs_test_opt(info, NODATACOW))
 		seq_puts(seq, ",nodatacow");
+	if (btrfs_test_opt(info, DAX))
+		seq_puts(seq, ",dax");
 	if (btrfs_test_opt(info, NOBARRIER))
 		seq_puts(seq, ",nobarrier");
 	if (info->max_inline != BTRFS_DEFAULT_MAX_INLINE)
