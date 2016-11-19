@@ -475,6 +475,13 @@ int btrfs_parse_options(struct btrfs_root *root, char *options,
 #ifdef CONFIG_FS_DAX
 		case Opt_dax:
 			btrfs_set_and_info(info, DAX, "setting dax");
+			if (btrfs_super_num_devices(info->super_copy) > 1) {
+				btrfs_info(info,
+					  "dax doesn't support multiple devices(%llu)\n",
+					   btrfs_super_num_devices(info->super_copy));
+				ret = -EOPNOTSUPP;
+				goto out;
+			}
 			/*
 			 * sb->s_blocksize is set to root->sectorsize
 			 * sb->s_bdev is required, but btrfs doesn't set it
