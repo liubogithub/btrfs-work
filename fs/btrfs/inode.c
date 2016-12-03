@@ -5072,13 +5072,20 @@ static int btrfs_setsize(struct inode *inode, struct iattr *attr)
 		if (ret)
 			return ret;
 
-		/* we don't support swapfiles, so vmtruncate shouldn't fail */
-		truncate_setsize(inode, newsize);
+		/*
+		 * Update isize first so that if upcoming unlock dio read won't
+		 * race with truncate if they are beyond new isize.
+		 */
+		i_size_write(inode, newsize);
 
 		/* Disable nonlocked read DIO to avoid the end less truncate */
 		btrfs_inode_block_unlocked_dio(inode);
 		inode_dio_wait(inode);
 		btrfs_inode_resume_unlocked_dio(inode);
+
+		down_write(&BTRFS_I(inode)->mmap_sem);
+		/* we don't support swapfiles, so vmtruncate shouldn't fail */
+		truncate_pagecache(inode, newsize);
 
 		ret = btrfs_truncate(inode);
 		if (ret && inode->i_nlink) {
@@ -5092,6 +5099,7 @@ static int btrfs_setsize(struct inode *inode, struct iattr *attr)
 			 */
 			trans = btrfs_join_transaction(root);
 			if (IS_ERR(trans)) {
+				up_write(&BTRFS_I(inode)->mmap_sem);
 				btrfs_orphan_del(NULL, inode);
 				return ret;
 			}
@@ -5112,6 +5120,7 @@ static int btrfs_setsize(struct inode *inode, struct iattr *attr)
 			if (IS_DAX(inode))
 				ret = btrfs_truncate_block(inode, newsize, 0, 0);
 		}
+		up_write(&BTRFS_I(inode)->mmap_sem);
 	}
 
 	return ret;
@@ -9875,6 +9884,7 @@ struct inode *btrfs_alloc_inode(struct super_block *sb)
 	INIT_LIST_HEAD(&ei->delayed_iput);
 	RB_CLEAR_NODE(&ei->rb_node);
 	init_rwsem(&ei->dio_sem);
+	init_rwsem(&ei->mmap_sem);
 
 	return inode;
 }
