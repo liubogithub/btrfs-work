@@ -1782,22 +1782,54 @@ out:
 	return written ? written : err;
 }
 
-static void update_time_for_write(struct inode *inode)
+static ssize_t btrfs_file_dax_write(struct kiocb *iocb,
+				    struct iov_iter *from)
 {
-	struct timespec now;
+	struct file *file = iocb->ki_filp;
+	struct inode *inode = file_inode(file);
+	struct btrfs_root *root = BTRFS_I(inode)->root;
+	ssize_t ret;
 
-	if (IS_NOCMTIME(inode))
-		return;
+	inode_lock(inode);
+	ret = btrfs_file_write_check(iocb, from);
+	if (ret)
+		goto out;
 
-	now = current_time(inode);
-	if (!timespec_equal(&inode->i_mtime, &now))
-		inode->i_mtime = now;
+	ret = iomap_dax_rw(iocb, from, &btrfs_iomap_ops);
+	if (ret > 0 && iocb->ki_pos > i_size_read(inode)) {
+		struct btrfs_trans_handle *trans = NULL;
+		ssize_t err;
 
-	if (!timespec_equal(&inode->i_ctime, &now))
-		inode->i_ctime = now;
+		trans = btrfs_start_transaction(root, 1);
+		if (IS_ERR(trans)) {
+			/* lets bail out and pretend the write failed */
+			ret = PTR_ERR(trans);
+			goto out;
+		}
 
-	if (IS_I_VERSION(inode))
-		inode_inc_iversion(inode);
+		/* iocb->ki_pos has been updated to new size in iomap_dax_rw. */
+		i_size_write(inode, iocb->ki_pos);
+
+		/* update i_disksize accordingly. */
+		btrfs_ordered_update_i_size(inode, iocb->ki_pos, NULL);
+
+		err = btrfs_update_inode_fallback(trans, root, inode);
+		btrfs_end_transaction(trans, root);
+		if (err) {
+			/* lets bail out and pretend the write failed */
+			ret = err;
+			goto out;
+		}
+
+		/*
+		 * no pagecache involved, thus no need to call
+		 * pagecache_isize_extended
+		 */
+	}
+
+out:
+	inode_unlock(inode);
+	return ret;
 }
 
 static ssize_t btrfs_file_buffered_write(struct kiocb *iocb,
@@ -1830,6 +1862,24 @@ out:
 	return ret;
 }
 
+static void update_time_for_write(struct inode *inode)
+{
+	struct timespec now;
+
+	if (IS_NOCMTIME(inode))
+		return;
+
+	now = current_time(inode);
+	if (!timespec_equal(&inode->i_mtime, &now))
+		inode->i_mtime = now;
+
+	if (!timespec_equal(&inode->i_ctime, &now))
+		inode->i_ctime = now;
+
+	if (IS_I_VERSION(inode))
+		inode_inc_iversion(inode);
+}
+
 static ssize_t btrfs_file_write_check(struct kiocb *iocb,
 				      struct iov_iter *from)
 {
@@ -1838,10 +1888,7 @@ static ssize_t btrfs_file_write_check(struct kiocb *iocb,
 	struct btrfs_root *root = BTRFS_I(inode)->root;
 	ssize_t err;
 	loff_t pos;
-	size_t count;
 	loff_t oldsize;
-	u64 start_pos;
-	u64 end_pos;
 
 	err = generic_write_checks(iocb, from);
 	if (err <= 0)
@@ -1860,12 +1907,16 @@ static ssize_t btrfs_file_write_check(struct kiocb *iocb,
 	update_time_for_write(inode);
 
 	pos = iocb->ki_pos;
-	count = iov_iter_count(from);
-	start_pos = round_down(pos, root->sectorsize);
 	oldsize = i_size_read(inode);
-	if (start_pos > oldsize) {
+	/*
+	 * Use pos instead of round_down(pos, root->sectorsize) to ensure that
+	 * we don't expose stale data if @pos is in the middle of a block.
+	 */
+	if (pos > oldsize) {
+		u64 end_pos;
 		/* Expand hole size to cover write data, preventing empty gap */
-		end_pos = round_up(pos + count, root->sectorsize);
+		end_pos = round_up(pos + iov_iter_count(from),
+				   root->sectorsize);
 		err = btrfs_cont_expand(inode, oldsize, end_pos);
 		if (err)
 			return err;
@@ -1898,9 +1949,14 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 	if (sync)
 		atomic_inc(&BTRFS_I(inode)->sync_writers);
 
-	if (iocb->ki_flags & IOCB_DIRECT) {
+	if (IS_DAX(inode)) {
+		num_written = btrfs_file_dax_write(iocb, from);
+		if (num_written == -EAGAIN)
+			goto buffered;
+	} else if (iocb->ki_flags & IOCB_DIRECT) {
 		num_written = btrfs_file_direct_write(iocb, from);
 	} else {
+buffered:
 		num_written = btrfs_file_buffered_write(iocb, from);
 	}
 
@@ -1919,6 +1975,47 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 		atomic_dec(&BTRFS_I(inode)->sync_writers);
 
 	return num_written;
+}
+
+static noinline ssize_t btrfs_file_dax_read(struct kiocb *iocb, struct iov_iter *to)
+{
+	struct file *file = iocb->ki_filp;
+	struct inode *inode = file_inode(iocb->ki_filp);
+	ssize_t ret;
+
+	if (!iov_iter_count(to))
+		return 0;	/* skip atime */
+
+	inode_lock_shared(inode);
+	ret = iomap_dax_rw(iocb, to, &btrfs_iomap_ops);
+	inode_unlock_shared(inode);
+
+	/*
+	 * update atime.
+	 */
+	file_accessed(file);
+
+	return ret;
+}
+
+static noinline ssize_t btrfs_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
+{
+	struct inode *inode = file_inode(iocb->ki_filp);
+	struct btrfs_root *root = BTRFS_I(inode)->root;
+	ssize_t ret;
+
+	if (test_bit(BTRFS_FS_STATE_ERROR, &root->fs_info->fs_state))
+		return -EROFS;
+
+	if (IS_DAX(inode)) {
+		ret = btrfs_file_dax_read(iocb, to);
+		if (ret == -EAGAIN)
+			goto buffered;
+	} else {
+buffered:
+		ret = generic_file_read_iter(iocb, to);
+	}
+	return ret;
 }
 
 int btrfs_release_file(struct inode *inode, struct file *filp)
@@ -2185,10 +2282,81 @@ out:
 	return ret > 0 ? -EIO : ret;
 }
 
+static int btrfs_filemap_page_mkwrite(struct vm_area_struct *vma,
+				      struct vm_fault *vmf)
+{
+	struct inode *inode = file_inode(vma->vm_file);
+	int ret;
+
+	sb_start_pagefault(inode->i_sb);
+	ret = file_update_time(vma->vm_file);
+	if (ret) {
+		if (ret == -ENOMEM)
+			ret = VM_FAULT_OOM;
+		else
+			ret = VM_FAULT_SIGBUS;
+		goto out;
+	}
+
+	if (IS_DAX(inode))
+		ret = iomap_dax_fault(vma, vmf, &btrfs_iomap_ops);
+	else
+		ret = btrfs_page_mkwrite(vma, vmf);
+
+out:
+	sb_end_pagefault(inode->i_sb);
+	return ret;
+}
+
+static int btrfs_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+{
+	struct inode *inode = file_inode(vma->vm_file);
+	int ret;
+
+	if ((vmf->flags & FAULT_FLAG_WRITE) && IS_DAX(inode))
+		return btrfs_filemap_page_mkwrite(vma, vmf);
+
+	if (IS_DAX(inode))
+		ret = iomap_dax_fault(vma, vmf, &btrfs_iomap_ops);
+	else
+		ret = filemap_fault(vma, vmf);
+
+	return ret;
+}
+
+static int btrfs_filemap_pfn_mkwrite(struct vm_area_struct *vma,
+				     struct vm_fault *vmf)
+{
+	struct inode *inode = file_inode(vma->vm_file);
+	struct super_block *sb = inode->i_sb;
+	loff_t size;
+	int ret = VM_FAULT_NOPAGE;
+
+	sb_start_pagefault(sb);
+	file_update_time(vma->vm_file);
+
+	/*
+	 * How to serialise against truncate/hole punch similar to page_mkwrite?
+	 * For truncate, we firstly update isize and then truncate pagecache in
+	 * order to avoid race against page fault.
+	 * For punch_hole, we use lock_extent and truncate pagecache.
+	 */
+	size = (i_size_read(inode) + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	if (vmf->pgoff >= size)
+		ret = VM_FAULT_SIGBUS;
+	else
+		ret = dax_pfn_mkwrite(vma, vmf);
+
+	sb_end_pagefault(sb);
+	return ret;
+}
+
 static const struct vm_operations_struct btrfs_file_vm_ops = {
-	.fault		= filemap_fault,
+	.fault		= btrfs_filemap_fault,
+//	.pmd_fault	= btrfs_filemap_pmd_fault,
 	.map_pages	= filemap_map_pages,
-	.page_mkwrite	= btrfs_page_mkwrite,
+	.page_mkwrite	= btrfs_filemap_page_mkwrite,
+	.pfn_mkwrite	= btrfs_filemap_pfn_mkwrite,
 };
 
 static int btrfs_file_mmap(struct file	*filp, struct vm_area_struct *vma)
@@ -2200,6 +2368,8 @@ static int btrfs_file_mmap(struct file	*filp, struct vm_area_struct *vma)
 
 	file_accessed(filp);
 	vma->vm_ops = &btrfs_file_vm_ops;
+	if (IS_DAX(file_inode(filp)))
+		vma->vm_flags |= VM_MIXEDMAP | VM_HUGEPAGE;
 
 	return 0;
 }
@@ -3014,7 +3184,7 @@ out:
 
 const struct file_operations btrfs_file_operations = {
 	.llseek		= btrfs_file_llseek,
-	.read_iter      = generic_file_read_iter,
+	.read_iter      = btrfs_file_read_iter,
 	.splice_read	= generic_file_splice_read,
 	.write_iter	= btrfs_file_write_iter,
 	.mmap		= btrfs_file_mmap,

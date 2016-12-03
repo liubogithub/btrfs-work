@@ -152,8 +152,23 @@ void btrfs_update_iflags(struct inode *inode)
 	if (ip->flags & BTRFS_INODE_DIRSYNC)
 		new_fl |= S_DIRSYNC;
 
+	/*
+	 * Do not set DAX flag if
+	 *   a) not with dax mount option or
+	 *   b) not a regular file or
+	 *   c) not a free space inode or
+	 *   d) not with nodatacow flag or
+	 *   e) with compress flag
+	 */
+	if (btrfs_test_opt(ip->root->fs_info, DAX) &&
+	    S_ISREG(inode->i_mode) &&
+	    !btrfs_is_free_space_inode(inode) &&
+	    (ip->flags & BTRFS_INODE_NODATACOW) &&
+	    !(ip->flags & BTRFS_INODE_COMPRESS))
+		new_fl |= S_DAX;
+
 	set_mask_bits(&inode->i_flags,
-		      S_SYNC | S_APPEND | S_IMMUTABLE | S_NOATIME | S_DIRSYNC,
+		      S_SYNC | S_APPEND | S_IMMUTABLE | S_NOATIME | S_DIRSYNC | S_DAX,
 		      new_fl);
 }
 
@@ -3887,6 +3902,9 @@ static noinline int btrfs_clone_files(struct file *file, struct file *file_src,
 	if (file_src->f_path.mnt != file->f_path.mnt ||
 	    src->i_sb != inode->i_sb)
 		return -EXDEV;
+
+	if (IS_DAX(inode))
+		return -EINVAL;
 
 	/* don't make the dst file partly checksummed */
 	if ((BTRFS_I(src)->flags & BTRFS_INODE_NODATASUM) !=
