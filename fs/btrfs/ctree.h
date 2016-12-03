@@ -38,6 +38,8 @@
 #include <linux/security.h>
 #include <linux/sizes.h>
 #include <linux/dynamic_debug.h>
+#include <linux/iomap.h>
+#include <linux/dax.h>
 #include "extent_io.h"
 #include "extent_map.h"
 #include "async-thread.h"
@@ -3081,6 +3083,8 @@ void btrfs_extent_item_to_extent_map(struct inode *inode,
 				     struct extent_map *em);
 
 /* inode.c */
+extern struct iomap_ops btrfs_iomap_ops;
+
 struct btrfs_delalloc_work {
 	struct inode *inode;
 	int delay_iput;
@@ -3096,6 +3100,7 @@ void btrfs_wait_and_free_delalloc_work(struct btrfs_delalloc_work *work);
 struct extent_map *btrfs_get_extent_fiemap(struct inode *inode, struct page *page,
 					   size_t pg_offset, u64 start, u64 len,
 					   int create);
+
 noinline int can_nocow_extent(struct inode *inode, u64 offset, u64 *len,
 			      u64 *orig_start, u64 *orig_block_len,
 			      u64 *ram_bytes);

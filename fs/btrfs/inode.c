@@ -4730,6 +4730,23 @@ int btrfs_truncate_block(struct inode *inode, loff_t from, loff_t len,
 	    (!len || ((len & (blocksize - 1)) == 0)))
 		goto out;
 
+	/*
+	 * for dax inode, this zeroout is necessary because flushing pages
+	 * doesn't work for dax inode.
+	 */
+	if (IS_DAX(inode)) {
+
+		if (front) {
+			return iomap_zero_range(inode, from - offset, offset,
+						NULL, &btrfs_iomap_ops);
+		} else {
+			if (!len)
+				len = blocksize - offset;
+			return iomap_zero_range(inode, from, len, NULL,
+						&btrfs_iomap_ops);
+		}
+	}
+
 	ret = btrfs_delalloc_reserve_space(inode,
 			round_down(from, blocksize), blocksize);
 	if (ret)
@@ -5083,6 +5100,17 @@ static int btrfs_setsize(struct inode *inode, struct iattr *attr)
 			if (err)
 				btrfs_abort_transaction(trans, err);
 			btrfs_end_transaction(trans, root);
+		}
+
+		if (!ret) {
+			/*
+			 * This is required by only truncating down dax inode,
+			 * non-dax inode can buffer read the end page and set
+			 * all zero beyond isize, DIO read will fallback to
+			 * buffered read thanks to unalignment sanity check.
+			 */
+			if (IS_DAX(inode))
+				ret = btrfs_truncate_block(inode, newsize, 0, 0);
 		}
 	}
 
@@ -7664,6 +7692,508 @@ static void adjust_dio_outstanding_extents(struct inode *inode,
 	}
 }
 
+/**
+ * btrfs_issue_zeroout - zeroout the content of the underlying device
+ * @fs_info:	the global btrfs_fs_info
+ * @start:	btrfs specific offset(bytenr)
+ * @len:	IO length
+ *
+ * This maps the IO range to the underlying device and zeroout the content.
+ *
+ * Return 0 for success, otherwise return errors.
+ */
+static noinline int btrfs_issue_zeroout(struct btrfs_fs_info *fs_info, u64 start,
+					u64 len)
+{
+	struct btrfs_bio *bbio = NULL;
+	struct btrfs_bio_stripe *stripe = NULL;
+	u64 map_length = len;
+	int rw;
+	int ret;
+
+	rw = REQ_OP_WRITE;
+	map_length = len;
+
+	ret = btrfs_map_block(fs_info, rw, start, &map_length, &bbio, 0);
+	if (ret)
+		return ret;
+
+	/* we assume that dax uses only one device. */
+	ASSERT(bbio->num_stripes == 1);
+	stripe = &bbio->stripes[0];
+
+	/* zero out the extent */
+	/*
+	 * without REQ_OP_DISCARD, stripe->length is not set, thus use len
+	 * instead.
+	 */
+	ret = blkdev_issue_zeroout(stripe->dev->bdev,
+				   stripe->physical >> 9,
+				   len >> 9,
+				   GFP_NOFS, true);
+	btrfs_put_bbio(bbio);
+
+	return ret;
+}
+
+/**
+ * btrfs_new_extent_dax - create file extent (metadata) for IO
+ * @inode:	inode
+ * @start:	aligned file offset
+ * @len:	aligned IO length
+ *
+ * This allocates a new file extent for the IO range and inserts it to fs/file
+ * tree.  This also does zeroout extent before insertion in order to avoid
+ * exposing stale data.
+ *
+ * Return 0 for success, otherwise return errors.
+ */
+static noinline struct extent_map *btrfs_new_extent_dax(struct inode *inode,
+							u64 start, u64 len)
+{
+	struct btrfs_root *root = BTRFS_I(inode)->root;
+	struct btrfs_trans_handle *trans = NULL;
+	struct extent_map *em = NULL;
+	struct btrfs_key ins;
+	u64 alloc_hint;
+	bool reserved_extent = false;
+	int ret;
+
+	/*
+	 * reserve data space and metadata space seperately, in order to keep
+	 * it simple, we're not going to use btrfs_reserve_metadata_space to
+	 * avoid playing with outstanding extent etc.
+	 */
+	ret = btrfs_check_data_free_space(inode, start, len);
+	if (ret)
+		return ERR_PTR(ret);
+
+	/*
+	 * 2 is to update fs tree with new extent and inode ltem.
+	 * Besides inode disk size, we also need update inode for inode
+	 * nbytes and last_trans, etc.
+	 */
+	trans = btrfs_start_transaction(root, 2);
+	if (IS_ERR(trans)) {
+		ret = PTR_ERR(trans);
+		trans = NULL;
+		goto out;
+	}
+
+
+	alloc_hint = get_extent_allocation_hint(inode, start, len);
+	ret = btrfs_reserve_extent(root, len, len, root->sectorsize, 0,
+				   alloc_hint, &ins, 1,
+				   0 /* We don't use delalloc here */ );
+	if (ret)
+		goto out;
+	reserved_extent = true;
+
+
+	ASSERT(len >= ins.offset);
+	if (len != ins.offset) {
+		/*
+		 * Since len has been adjusted shorter, free the reserved
+		 * data space.
+		 * This is for btrfs_check_data_free_space.
+		 */
+		btrfs_free_reserved_data_space(inode, start + ins.offset,
+					       len - ins.offset);
+		len = min_t(u64, len, ins.offset);
+	}
+
+	em = create_pinned_em(inode, start, len, start, ins.objectid,
+			      len, len, len, 0);
+	if (IS_ERR(em)) {
+		ret = PTR_ERR(em);
+		em = NULL;
+		goto out;
+	}
+	/* zeroout the newly allocated extent */
+	ret = btrfs_issue_zeroout(BTRFS_I(inode)->root->fs_info,
+				  em->block_start, len);
+	if (ret)
+		goto out;
+
+	ret = insert_reserved_file_extent(trans, inode,
+					  start, /* file_pos */
+					  ins.objectid, /* disk_bytenr */
+					  len, /* disk_num_bytes */
+					  len, /* num_bytes */
+					  len, /* ram_bytes */
+					  0, /* compression */
+					  0, /* encryption */
+					  0, /* other_encoding */
+					  BTRFS_FILE_EXTENT_REG);
+	unpin_extent_cache(&BTRFS_I(inode)->extent_tree, start, len, trans->transid);
+
+	/*
+	 * inc has been done in btrfs_reserve_extent.
+	 * Here we don't use ordered extent, but we've inserted file extent
+	 * so that relocate_block_group will get a consistent fs/file tree.
+	 */
+	btrfs_dec_block_group_reservations(root->fs_info, ins.objectid);
+	if (ret)
+		goto out;
+
+	ret = btrfs_update_inode_fallback(trans, root, inode);
+
+out:
+	if (trans)
+		btrfs_end_transaction(trans, root);
+
+	if (ret) {
+		/* this is for btrfs_check_data_free_space.  */
+		btrfs_free_reserved_data_space(inode, start, len);
+
+		/* this is for btrfs_reserve_extent */
+		if (reserved_extent)
+			btrfs_free_reserved_extent(root, ins.objectid, ins.offset, 0);
+
+		if (em) {
+			free_extent_map(em);
+			btrfs_drop_extent_cache(inode, start, start + len - 1, 0);
+		}
+
+		em = ERR_PTR(ret);
+	}
+
+	return em;
+}
+
+/**
+ * btrfs_apply_nocow_or_prealloc_extent - apply IO on existing/prealloc extent
+ * @inode:	inode
+ * @em_ret:	extent map for return
+ * @start:	file offset
+ * @len_ret:	IO length for return
+ *
+ * This checks if the IO range covers any shared extent, if not, apply
+ * overwrite on existing/prealloc extent (prealloc extent needs to be converted
+ * to regular extent before applying overwrite).
+ *
+ * Return 0 for success, otherwise return error.
+ */
+static noinline int
+btrfs_apply_nocow_or_prealloc_extent(struct inode *inode, struct extent_map **em_ret,
+				     u64 start, u64 *len_ret)
+{
+	struct btrfs_root *root = BTRFS_I(inode)->root;
+	struct extent_map *em_insert = NULL;
+	struct extent_map *em = NULL;
+	struct btrfs_trans_handle *trans = NULL;
+	u64 block_start;
+	u64 orig_start;
+	u64 orig_block_len;
+	u64 ram_bytes;
+	u64 len;
+	int ret;
+
+	em = *em_ret;
+	len = *len_ret;
+
+	block_start = em->block_start + (start - em->start);
+	ASSERT(IS_ALIGNED(len, PAGE_SIZE));
+	ASSERT(len >= PAGE_SIZE);
+
+	if (can_nocow_extent(inode, start, &len, &orig_start,
+			     &orig_block_len, &ram_bytes) != 1) {
+		/* This has been shared, however dax cannot handle this. */
+		btrfs_err_rl(root->fs_info, "Ooops, dax inode %llu has shared extent!\n", btrfs_ino(inode));
+		return -EIO;
+	}
+
+	/*
+	 * if it is a non shared extent and non-prealloc extent,
+	 * we're good to return and do overwrite.
+	 */
+	if (!test_bit(EXTENT_FLAG_PREALLOC, &em->flags)) {
+		return 0;
+	}
+
+	/* now we have a prealloc extent to fill */
+	btrfs_inc_nocow_writers(root->fs_info, block_start);
+
+	/*
+	 * we may change @len if prealloc extent length is
+	 * smaller than @len.
+	 */
+	ASSERT(IS_ALIGNED(len, PAGE_SIZE));
+	ASSERT(len >= PAGE_SIZE);
+
+	trans = btrfs_start_transaction(root, 1);
+	if (IS_ERR(trans)) {
+		ret = PTR_ERR(trans);
+		trans = NULL;
+		btrfs_err_rl(root->fs_info, "start_transaction error %d inode %llu start %llu len %llu\n", ret, btrfs_ino(inode), start, len);
+		goto out;
+	}
+
+	em_insert = create_pinned_em(inode, start, len,
+				     orig_start,
+				     block_start, len,
+				     orig_block_len,
+				     ram_bytes,
+				     BTRFS_ORDERED_PREALLOC);
+	if (em_insert && IS_ERR(em_insert)) {
+		ret = PTR_ERR(em_insert);
+		btrfs_err_rl(root->fs_info, "create_pinned_em error %d inode %llu start %llu len %llu\n", ret, btrfs_ino(inode), start, len);
+		goto out;
+	}
+
+	free_extent_map(em);
+	em = em_insert;
+	ASSERT(start == em->start);
+
+	ret = btrfs_issue_zeroout(BTRFS_I(inode)->root->fs_info,
+				  em->block_start, len);
+	if (ret)
+		goto out;
+
+	/*
+	 * This takes care of
+	 * - splitting extents
+	 * - convert extent from prealloc to REG.
+	 */
+	ret = btrfs_mark_extent_written(trans, inode, start,
+					start + len);
+
+	unpin_extent_cache(&BTRFS_I(inode)->extent_tree, start,
+			   len, trans->transid);
+
+	if (ret < 0) {
+		btrfs_err_rl(root->fs_info, "mark_extent error %d inode %llu start %llu len %llu\n", ret, btrfs_ino(inode), start, len);
+		goto out;
+	}
+	*em_ret = em;
+	*len_ret = len;
+
+out:
+	if (ret) {
+		free_extent_map(em);
+		btrfs_drop_extent_cache(inode, start,
+					start + len - 1, 0);
+	}
+	if (trans)
+		btrfs_end_transaction(trans, root);
+
+	btrfs_dec_nocow_writers(root->fs_info, block_start);
+	return ret;
+}
+
+/**
+ * btrfs_em_to_iomap - convert em to iomap
+ * @fs_info:	the global btrfs_fs_info
+ * @start:	file offset
+ * @len:	IO length
+ * @em:		extent map which contains mapping info.
+ * @create:	flag of read/write
+ * @iomap:	IO mapping
+ *
+ * This maps from em's filesystem specific offset(bytenr) to disk offset of the
+ * underlying device that is required by @iomap.
+ *
+ * Return 0 for success, otherwise return error.
+ */
+static int btrfs_em_to_iomap(struct btrfs_fs_info *fs_info, u64 start, u64 len,
+			     struct extent_map *em, int create,
+			     struct iomap *iomap)
+{
+	struct btrfs_bio *bbio = NULL;
+	struct btrfs_bio_stripe *stripe = NULL;
+	u64 logical;
+	u64 map_length;
+	int rw;
+	int ret;
+
+	if (create)
+		rw = REQ_OP_WRITE;
+	else
+		rw = REQ_OP_READ;
+
+	logical = em->block_start + (start - em->start);
+	map_length = em->len;
+
+	/*
+	 * btrfs_map_block needs a btrfs logical bytenr,
+	 * not sector off.
+	 */
+	ret = btrfs_map_block(fs_info, rw, logical, &map_length, &bbio, 0);
+	if (ret)
+		return ret;
+
+	/* we assume that dax uses only one device. */
+	ASSERT(bbio->num_stripes == 1);
+	stripe = &bbio->stripes[0];
+
+	iomap->flags = 0;
+	iomap->bdev = stripe->dev->bdev;
+	iomap->type = IOMAP_MAPPED;
+	iomap->offset = start;
+	/* this requires sector */
+	iomap->blkno = stripe->physical >> 9;
+	iomap->length = len;
+
+	btrfs_put_bbio(bbio);
+	return 0;
+}
+
+/**
+ * btrfs_get_blocks_dax_fault - map file offset to disk offset
+ * @inode:	inode
+ * @start:	aligned file offset
+ * @len:	aligned IO length
+ * @iomap:	IO mapping
+ * @create:	flag of read/write
+ *
+ * This function provides mapping from file offset to offset of directly mapped
+ * persistent memory for IO operations including mmap.
+ *
+ * Return 0 for success, otherwise return error.
+ */
+static noinline int
+btrfs_get_blocks_dax_fault(struct inode *inode, u64 start, u64 len,
+			   struct iomap *iomap, int create)
+{
+	u64 lockstart, lockend;
+	struct extent_state *cached_state = NULL;
+	struct btrfs_root *root = BTRFS_I(inode)->root;
+	struct extent_map *em;
+	int ret = 0;
+
+	if (!create && start >= i_size_read(inode)) {
+		return 0;
+	}
+
+	lockstart = start;
+	lockend = start + len - 1;
+
+	ASSERT(IS_ALIGNED(start, PAGE_SIZE));
+	ASSERT(IS_ALIGNED(start, root->sectorsize));
+	ASSERT(len >= PAGE_SIZE);
+
+	ASSERT(!!(BTRFS_I(inode)->flags & BTRFS_INODE_NODATACOW) == 1);
+	ASSERT(!!(BTRFS_I(inode)->flags & BTRFS_INODE_NODATASUM) == 1);
+
+	/* dax inode doesn't have ordered extent. */
+	lock_extent_bits(&BTRFS_I(inode)->io_tree, lockstart, lockend, &cached_state);
+
+	em = btrfs_get_extent(inode, NULL, 0, start, len, 0);
+	if (IS_ERR(em)) {
+		ret = PTR_ERR(em);
+		em = NULL;
+		goto out;
+	}
+
+	if (test_bit(EXTENT_FLAG_COMPRESSED, &em->flags) ||
+	    em->block_start == EXTENT_MAP_INLINE) {
+		/* Fallback to buffered. */
+		ret = -EAGAIN;
+		goto out;
+	}
+
+	if (!create &&
+	    (em->block_start == EXTENT_MAP_HOLE ||
+	     test_bit(EXTENT_FLAG_PREALLOC, &em->flags))) {
+		iomap->flags = 0;
+
+		if (em->block_start == EXTENT_MAP_HOLE)
+			iomap->type = IOMAP_HOLE;
+		else if (test_bit(EXTENT_FLAG_PREALLOC, &em->flags))
+			iomap->type = IOMAP_UNWRITTEN;
+
+		iomap->offset = start;
+		iomap->blkno = IOMAP_NULL_BLOCK;
+		iomap->length = 1 << inode->i_blkbits;
+
+		goto out;
+	}
+
+	if (!create) {
+		len = min(len, em->len - (start - em->start));
+		goto map_block;
+	}
+
+	/* We make sure that dax inode is nodatacow */
+	if (test_bit(EXTENT_FLAG_PREALLOC, &em->flags) ||
+	    (em->block_start != EXTENT_MAP_HOLE)) {
+		/* prealloc minimum size is blocksize */
+		len = min_t(u64, len, em->len - (start - em->start));
+
+		/*
+		 * em may be merged in em tree, which means this em contains
+		 * two or more contiguous extents, but we search and process
+		 * file extent one by one, so em and len may be changed in
+		 * the following function.
+		 */
+		ret = btrfs_apply_nocow_or_prealloc_extent(inode, &em,
+							   start, &len);
+		if (ret) {
+			/*
+			 * em has been freed inside
+			 * btrfs_apply_nocow_or_prealloc_extent.
+			 */
+			em = NULL;
+			goto out;
+		}
+
+		if (test_bit(EXTENT_FLAG_PREALLOC, &em->flags))
+			ASSERT(len == em->len);
+		goto map_block;
+	}
+
+	ASSERT(em->block_start == EXTENT_MAP_HOLE);
+	if (em->block_start == EXTENT_MAP_HOLE) {
+		/*
+		 * |-------hole--------||------extent------|
+		 *      |----range to write----|
+		 * the range should be splitted to two part, the first one
+		 * will be new allocated extent, the rest will be overwriting
+		 * on the existing extent because of nocow that dax implies.
+		 *
+		 * The above can happen because DAX io can be unaligned to
+		 * blocksize, so be careful to not zero out the existing
+		 * block that (start+len) belongs to because it can end up
+		 * _data loss of the existing block_.
+		 * Note that (start + len) here is aligned but the actual
+		 * (start + len) of IO may not.
+		 */
+		len = min_t(u64, extent_map_end(em) - start, len);
+
+		/*
+		 * em->len may NOT be AGIGN to PAGE_SIZE/sectorsize if a hole
+		 * extent was created by find_first_non_hole in
+		 * btrfs_punch_hole.
+		 */
+		len = ALIGN(len, root->sectorsize);
+
+		ASSERT(IS_ALIGNED(len, PAGE_SIZE));
+		free_extent_map(em);
+
+		em = btrfs_new_extent_dax(inode, start, len);
+		if (IS_ERR(em)) {
+			ret = PTR_ERR(em);
+			em = NULL;
+			goto out;
+		}
+		ASSERT(start == em->start);
+		len = min_t(u64, len, em->len - (start - em->start));
+		ASSERT(IS_ALIGNED(len, PAGE_SIZE));
+		iomap->flags = IOMAP_F_NEW;
+	}
+
+map_block:
+	ret = btrfs_em_to_iomap(root->fs_info, start, len, em, create, iomap);
+
+out:
+	free_extent_map(em);
+
+	ASSERT(lockstart < lockend);
+	unlock_extent_cached(&BTRFS_I(inode)->io_tree, lockstart, lockend, &cached_state, GFP_NOFS);
+
+	return ret;
+}
+
 static int btrfs_get_blocks_direct(struct inode *inode, sector_t iblock,
 				   struct buffer_head *bh_result, int create)
 {
@@ -8993,7 +9523,6 @@ int btrfs_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 	unsigned long zero_start;
 	loff_t size;
 	int ret;
-	int reserved = 0;
 	u64 reserved_space;
 	u64 page_start;
 	u64 page_end;
@@ -9001,7 +9530,6 @@ int btrfs_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 
 	reserved_space = PAGE_SIZE;
 
-	sb_start_pagefault(inode->i_sb);
 	page_start = page_offset(page);
 	page_end = page_start + PAGE_SIZE - 1;
 	end = page_end;
@@ -9016,21 +9544,16 @@ int btrfs_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 	 */
 	ret = btrfs_delalloc_reserve_space(inode, page_start,
 					   reserved_space);
-	if (!ret) {
-		ret = file_update_time(vma->vm_file);
-		reserved = 1;
-	}
 	if (ret) {
 		if (ret == -ENOMEM)
 			ret = VM_FAULT_OOM;
 		else /* -ENOSPC, -EIO, etc */
 			ret = VM_FAULT_SIGBUS;
-		if (reserved)
-			goto out;
 		goto out_noreserve;
 	}
 
 	ret = VM_FAULT_NOPAGE; /* make the VM retry the fault */
+
 again:
 	lock_page(page);
 	size = i_size_read(inode);
@@ -9117,14 +9640,11 @@ again:
 
 out_unlock:
 	if (!ret) {
-		sb_end_pagefault(inode->i_sb);
 		return VM_FAULT_LOCKED;
 	}
 	unlock_page(page);
-out:
 	btrfs_delalloc_release_space(inode, page_start, reserved_space);
 out_noreserve:
-	sb_end_pagefault(inode->i_sb);
 	return ret;
 }
 
@@ -10573,6 +11093,36 @@ out_inode:
 	goto out;
 
 }
+
+static noinline int btrfs_file_iomap_begin(struct inode *inode, loff_t offset,
+					   loff_t length, unsigned flags,
+					   struct iomap *iomap)
+{
+	struct btrfs_root *root = BTRFS_I(inode)->root;
+	int ret;
+	u64 start;
+	u64 len;
+
+	start = round_down(offset, root->sectorsize);
+	len = ALIGN(length, root->sectorsize);
+
+	ret = btrfs_get_blocks_dax_fault(inode, start, len, iomap, flags &
+					 IOMAP_WRITE);
+
+	return ret;
+}
+
+static noinline int btrfs_file_iomap_end(struct inode *inode, loff_t offset,
+					 loff_t length, ssize_t written,
+					 unsigned flags, struct iomap *iomap)
+{
+	return 0;
+}
+
+struct iomap_ops btrfs_iomap_ops = {
+	.iomap_begin		= btrfs_file_iomap_begin,
+	.iomap_end		= btrfs_file_iomap_end,
+};
 
 static const struct inode_operations btrfs_dir_inode_operations = {
 	.getattr	= btrfs_getattr,
