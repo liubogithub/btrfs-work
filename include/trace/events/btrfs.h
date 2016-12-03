@@ -7,6 +7,7 @@
 #include <linux/writeback.h>
 #include <linux/tracepoint.h>
 #include <trace/events/mmflags.h>
+#include <linux/iomap.h>
 
 struct btrfs_root;
 struct btrfs_fs_info;
@@ -1470,6 +1471,107 @@ TRACE_EVENT(qgroup_update_counters,
 		  __entry->cur_old_count,
 		  __entry->cur_new_count)
 );
+
+DECLARE_EVENT_CLASS(btrfs_iomap_class,
+
+	TP_PROTO(struct inode *inode, u64 offset, u64 len, struct iomap *iomap),
+
+	TP_ARGS(inode, offset, len, iomap),
+
+	TP_STRUCT__entry_btrfs(
+		__field(	u64,  ino			)
+		__field(	u64,  isize			)
+		__field(	u64,  disk_isize		)
+		__field(	u64,  root_objectid		)
+		__field(	u64,  offset			)
+		__field(	u64,  len			)
+		__field(	u64,  startoff			)
+		__field(	u64,  blockstart		)
+		__field(	u64,  blocklen			)
+	),
+
+	TP_fast_assign_btrfs(btrfs_sb(inode->i_sb),
+		__entry->ino = btrfs_ino(inode);
+		__entry->isize = i_size_read(inode);
+		__entry->disk_isize = BTRFS_I(inode)->disk_i_size;
+		__entry->root_objectid =
+				BTRFS_I(inode)->root->root_key.objectid;
+		__entry->offset = offset;
+		__entry->len = len;
+		__entry->startoff = iomap ? iomap->offset : 0;
+		__entry->blockstart = iomap ? (iomap->blkno << 9) : 0;
+		__entry->blocklen = iomap ? iomap->length : 0;
+	),
+
+	TP_printk_btrfs("root 0x%llx(%s) ino 0x%llx size 0x%llx "
+			"disk_isize 0x%llx offset 0x%llx len 0x%llx "
+			"startoff 0x%llx blockstart %llu blocklen 0x%llx",
+		  show_root_type(__entry->root_objectid),
+		  __entry->ino,
+		  __entry->isize,
+		  __entry->disk_isize,
+		  __entry->offset,
+		  __entry->len,
+		  __entry->startoff,
+		  __entry->blockstart,
+		  __entry->blocklen)
+);
+
+#define DEFINE_IOMAP_EVENT(name)	\
+DEFINE_EVENT(btrfs_iomap_class, name,	\
+	TP_PROTO(struct inode *inode, u64 offset, u64 len,	\
+		 struct iomap *iomap),				\
+	TP_ARGS(inode, offset, len, iomap));
+
+DEFINE_IOMAP_EVENT(btrfs_iomap_alloc)
+DEFINE_IOMAP_EVENT(btrfs_iomap_found)
+
+DECLARE_EVENT_CLASS(btrfs_get_blocks_dax,
+
+	TP_PROTO(struct inode *inode, u64 offset, u64 len, int create),
+
+	TP_ARGS(inode, offset, len, create),
+
+	TP_STRUCT__entry_btrfs(
+		__field(	u64,  root_objectid		)
+		__field(	u64,  ino			)
+		__field(	u64,  isize			)
+		__field(	u64,  disk_isize		)
+		__field(	u64,  offset			)
+		__field(	u64,  len			)
+		__field(	int,  create			)
+	),
+
+	TP_fast_assign_btrfs(btrfs_sb(inode->i_sb),
+		__entry->root_objectid	= BTRFS_I(inode)->root->objectid;
+		__entry->ino = btrfs_ino(inode);
+		__entry->isize = i_size_read(inode);
+		__entry->disk_isize = BTRFS_I(inode)->disk_i_size;
+		__entry->offset = offset;
+		__entry->len = len;
+		__entry->create = create;
+	),
+
+	TP_printk_btrfs("root 0x%llx(%s) ino 0x%llx isize 0x%llx "
+			"disk_isize 0x%llx offset 0x%llx len 0x%llx create %d",
+			show_root_type(__entry->root_objectid),
+			__entry->ino,
+			__entry->isize,
+			__entry->disk_isize,
+			__entry->offset,
+			__entry->len,
+			__entry->create
+		  )
+);
+
+#define DEFINE_GETBLOCKS_DAX_EVENT(name)	\
+DEFINE_EVENT(btrfs_get_blocks_dax, name,	\
+	TP_PROTO(struct inode *inode, u64 offset, u64 len,	\
+		 int create),				\
+	TP_ARGS(inode, offset, len, create));
+
+DEFINE_GETBLOCKS_DAX_EVENT(btrfs_get_blocks_dax_entry)
+DEFINE_GETBLOCKS_DAX_EVENT(btrfs_get_blocks_dax_exit)
 
 #endif /* _TRACE_BTRFS_H */
 

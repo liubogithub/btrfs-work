@@ -8070,6 +8070,8 @@ btrfs_get_blocks_dax_fault(struct inode *inode, u64 start, u64 len,
 	struct extent_map *em;
 	int ret = 0;
 
+	trace_btrfs_get_blocks_dax_entry(inode, start, len, create);
+
 	if (!create && start >= i_size_read(inode)) {
 		return 0;
 	}
@@ -8193,12 +8195,19 @@ btrfs_get_blocks_dax_fault(struct inode *inode, u64 start, u64 len,
 
 map_block:
 	ret = btrfs_em_to_iomap(root->fs_info, start, len, em, create, iomap);
+	if (!ret) {
+		if (create)
+			trace_btrfs_iomap_alloc(inode, start, len, iomap);
+		else
+			trace_btrfs_iomap_found(inode, start, len, iomap);
+	}
 
 out:
 	free_extent_map(em);
 
 	ASSERT(lockstart < lockend);
 	unlock_extent_cached(&BTRFS_I(inode)->io_tree, lockstart, lockend, &cached_state, GFP_NOFS);
+	trace_btrfs_get_blocks_dax_exit(inode, start, len, create);
 
 	return ret;
 }
