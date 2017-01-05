@@ -845,7 +845,5 @@ static inline char *btrfs_err_str(enum btrfs_err_code err_code)
 				   struct btrfs_ioctl_feature_flags[3])
 #define BTRFS_IOC_RM_DEV_V2 _IOW(BTRFS_IOCTL_MAGIC, 58, \
 				   struct btrfs_ioctl_vol_args_v2)
-#define BTRFS_IOC_FSGETXATTR	FS_IOC_FSGETXATTR
-#define BTRFS_IOC_FSSETXATTR	FS_IOC_FSSETXATTR
 
 #endif /* _UAPI_LINUX_BTRFS_H */

@@ -372,52 +372,6 @@ static int btrfs_ioctl_getversion(struct file *file, int __user *arg)
 	return put_user(inode->i_generation, arg);
 }
 
-static int btrfs_ioctl_fsgetxattr(struct file *file, int __user *arg)
-{
-	struct inode *inode = file_inode(file);
-	struct btrfs_inode *ip = BTRFS_I(inode);
-	struct fsxattr fa;
-
-	memset(&fa, 0, sizeof(struct fsxattr));
-	fa.fsx_xflags = btrfs_iflags_to_xflags(ip);
-
-	if (copy_to_user(arg, &fa, sizeof(fa)))
-		return -EFAULT;
-	return 0;
-}
-
-#define BTRFS_SUPPORTED_FS_XFLAGS (FS_XFLAG_SYNC | FS_XFLAG_IMMUTABLE | \
-				   FS_XFLAG_APPEND | FS_XFLAG_NODUMP | \
-				   FS_XFLAG_NOATIME | FS_XFLAG_DAX)
-
-static int check_xflags(int xflags)
-{
-	if (fa.fsx_xflags & ~BTRFS_SUPPORTED_FS_XFLAGS)
-		return -EOPNOTSUPP;
-	return 0;
-}
-
-static int btrfs_ioctl_fssetxattr(struct file *file, int __user *arg)
-{
-	struct inode *inode = file_inode(file);
-	struct btrfs_inode *ip = BTRFS_I(inode);
-	struct btrfs_root *root = ip->root;
-	struct fsxattr fa;
-
-	if (!inode_owner_or_capable(inode))
-		return -EPERM;
-
-	if (btrfs_root_readonly(root))
-		return -EROFS;
-
-	if (copy_from_user(&fa, arg, sizeof(fa)))
-		return -EFAULT;
-
-	ret = check_xflags(fa.fsx_xflags);
-	if (ret)
-		return ret;
-}
-
 static noinline int btrfs_ioctl_fitrim(struct file *file, void __user *arg)
 {
 	struct inode *inode = file_inode(file);
@@ -5572,10 +5526,6 @@ long btrfs_ioctl(struct file *file, unsigned int
 		return btrfs_ioctl_setflags(file, argp);
 	case FS_IOC_GETVERSION:
 		return btrfs_ioctl_getversion(file, argp);
-	case BTRFS_IOC_FSGETXATTR:
-		return btrfs_ioctl_fsgetxattr(file, argp);
-	case BTRFS_IOC_FSSETXATTR:
-		return btrfs_ioctl_fssetxattr(file, argp);
 	case FITRIM:
 		return btrfs_ioctl_fitrim(file, argp);
 	case BTRFS_IOC_SNAP_CREATE:
