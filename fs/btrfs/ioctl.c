@@ -2667,6 +2667,11 @@ static long btrfs_ioctl_add_dev(struct btrfs_fs_info *fs_info, void __user *arg)
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
+	if (btrfs_test_opt(fs_info, DAX)) {
+		btrfs_info(fs_info, "dax doesn't support multiple devices\n");
+		return -EOPNOTSUPP;
+	}
+
 	if (atomic_xchg(&fs_info->mutually_exclusive_operation_running, 1))
 		return BTRFS_ERROR_DEV_EXCL_RUN_IN_PROGRESS;
 
