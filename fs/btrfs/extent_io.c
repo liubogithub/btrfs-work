@@ -1549,8 +1549,49 @@ out:
 	return found;
 }
 
+static noinline void
+__unlock_for_delalloc_entries(struct inode *inode, u64 start, u64 end)
+{
+	pgoff_t start_index;
+	pgoff_t end_index;
+	pgoff_t index;
+	unsigned int nr_entries;
+	struct page *pages[16];
+	pgoff_t indices[16];
+	struct page *this_entry;
+	pgoff_t this_index;
+	int i;
+	int nr;
+
+	start_index = start >> PAGE_SHIFT;
+	end_index = end >> PAGE_SHIFT;
+
+	if (start_index == end_index) {
+		/* XXX: fina a way to verify start_index matches locked_entry */
+		return;
+	}
+
+	index = start_index;
+	nr_entries = end_index - start_index + 1;
+	while (nr_entries > 0) {
+		nr = find_get_entries_contig(inode->i_mapping, start_index,
+					     min_t(unsigned long, nr_entries, 16), pages, indices);
+		for (i = 0; i < nr; i++) {
+			this_entry = pages[i];
+			this_index = indices[i];
+
+			if (this_index != index) {
+				put_locked_mapping_entry(inode->i_mapping, this_index, this_entry);
+			}
+		}
+		nr_entries -= nr;
+		start_index += nr;
+		cond_resched();
+	}
+}
+
 static noinline void __unlock_for_delalloc(struct inode *inode,
-					   struct page *locked_page,
+					   void *locked_page,
 					   u64 start, u64 end)
 {
 	int ret;
@@ -1560,12 +1601,15 @@ static noinline void __unlock_for_delalloc(struct inode *inode,
 	unsigned long nr_pages = end_index - index + 1;
 	int i;
 
-	if (index == locked_page->index && end_index == index)
+	if (radix_tree_exceptional_entry(locked_page))
+		return __unlock_for_delalloc_entries(inode, start, end);
+
+	if (index == ((struct page *)locked_page)->index && end_index == index)
 		return;
 
 	while (nr_pages > 0) {
 		ret = find_get_pages_contig(inode->i_mapping, index,
-				     min_t(unsigned long, nr_pages,
+					    min_t(unsigned long, nr_pages,
 				     ARRAY_SIZE(pages)), pages);
 		for (i = 0; i < ret; i++) {
 			if (pages[i] != locked_page)
@@ -1578,8 +1622,108 @@ static noinline void __unlock_for_delalloc(struct inode *inode,
 	}
 }
 
+/*
+ * return -EAGAIN will tell caller just write the locked entry
+ */
+static noinline int
+lock_delalloc_entries(struct inode *inode, void *locked_entry, u64 start, u64 end)
+{
+	struct page *pages[16];
+	pgoff_t indices[16];
+	pgoff_t this_index;
+	struct page *this_entry;
+	int i;
+	int nr;
+	pgoff_t start_index;
+	pgoff_t end_index;
+	pgoff_t index;
+	unsigned int nr_entries;
+	struct address_space *mapping;
+	struct radix_tree_root *page_tree;
+	int pages_locked;
+	int ret;
+
+	start_index = start >> PAGE_SHIFT;
+	end_index = end >> PAGE_SHIFT;
+
+	if (start_index == end_index)
+		return 0;
+
+	index = start_index;
+	nr_entries = end_index - start_index + 1;
+	mapping = inode->i_mapping;
+	page_tree = &mapping->page_tree;
+
+	while (nr_entries > 0) {
+		nr = find_get_entries_contig(mapping, start_index, min_t(unsigned long, nr_entries, 16), pages, indices);
+		if (nr == 0) {
+			ret = -EAGAIN;
+			goto done;
+		}
+
+		for (i = 0; i < nr; i++) {
+			this_index = indices[i];
+			this_entry = pages[i];
+
+			/*
+			 * entry at this_index has bene locked by caller
+			 */
+			if (this_index != index) {
+				void **slot;
+				void *entry;
+
+				spin_lock_irq(&mapping->tree_lock);
+				/* XXX: define slot */
+				entry = get_unlocked_mapping_entry(mapping, this_index, &slot);
+				/*
+				 * entry got punched out / reallocated ?
+				 */
+				if (!entry || !radix_tree_exceptional_entry(entry)) {
+					ret = -EAGAIN;
+					goto done;
+				}
+				/*
+				 * if entry got reallocated elsewhere, we don't need to writeback it here.
+				 */
+				if (dax_radix_sector(entry) != dax_radix_sector(this_entry)) {
+					ret = -EAGAIN;
+					goto done;
+				}
+				if (WARN_ON_ONCE(dax_is_empty_entry(entry) || dax_is_zero_entry(entry))) {
+					/*
+					 * don't bother to write, something serious happens.
+					 */
+					ret = -EIO;
+					goto done;
+				}
+				/*
+				 * Another fsync thread has already written back this entry.
+				 */
+				if (!radix_tree_tag_get(page_tree, this_index, PAGECACHE_TAG_TOWRITE)) {
+					ret = -EAGAIN;
+					goto done;
+				}
+				entry = lock_slot(mapping, slot);
+				spin_unlock_irq(&mapping->tree_lock);
+			} /* check if pages are still valid with lock */
+			pages_locked++;
+		}
+		nr_entries -= nr;
+		start_index += nr;
+		cond_resched();
+	}
+	ret = 0;
+done:
+	/* on error, unlock everything */
+	if (ret && pages_locked) {
+		__unlock_for_delalloc(inode, locked_entry, start,
+				      ((u64)(start_index + pages_locked - 1)) << PAGE_SHIFT);
+	}
+	return ret;
+}
+
 static noinline int lock_delalloc_pages(struct inode *inode,
-					struct page *locked_page,
+					void *locked_page,
 					u64 delalloc_start,
 					u64 delalloc_end)
 {
@@ -1592,8 +1736,11 @@ static noinline int lock_delalloc_pages(struct inode *inode,
 	int ret;
 	int i;
 
+	if (radix_tree_exceptional_entry(locked_page))
+		return lock_delalloc_entries(inode, locked_page, delalloc_start, delalloc_end);
+
 	/* the caller is responsible for locking the start index */
-	if (index == locked_page->index && index == end_index)
+	if (index == ((struct page *)locked_page)->index && index == end_index)
 		return 0;
 
 	/* skip the page at the start index */
@@ -1646,9 +1793,9 @@ done:
  *
  * 1 is returned if we find something, 0 if nothing was in the tree
  */
-STATIC u64 find_lock_delalloc_range(struct inode *inode,
+u64 find_lock_delalloc_range(struct inode *inode,
 				    struct extent_io_tree *tree,
-				    struct page *locked_page, u64 *start,
+				    void *locked_page, u64 *start,
 				    u64 *end, u64 max_bytes)
 {
 	u64 delalloc_start;
@@ -1745,6 +1892,11 @@ void extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
 
 	if ((page_ops & PAGE_SET_ERROR) && nr_pages > 0)
 		mapping_set_error(inode->i_mapping, -EIO);
+
+	if (locked_page && radix_tree_exceptional_entry(locked_page)) {
+		__unlock_for_delalloc(inode, locked_page, start, end);
+		return;
+	}
 
 	while (nr_pages > 0) {
 		ret = find_get_pages_contig(inode->i_mapping, index,

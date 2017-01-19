@@ -319,6 +319,14 @@ static inline int set_extent_delalloc(struct extent_io_tree *tree, u64 start,
 			      NULL, cached_state, GFP_NOFS);
 }
 
+static inline int clear_extent_delalloc(struct extent_io_tree *tree, u64 start,
+		u64 end, struct extent_state **cached_state)
+{
+	return clear_extent_bit(tree, start, end,
+				EXTENT_DELALLOC,
+				0, 0, cached_state, GFP_NOFS);
+}
+
 static inline int set_extent_defrag(struct extent_io_tree *tree, u64 start,
 		u64 end, struct extent_state **cached_state)
 {
@@ -489,12 +497,10 @@ struct bio *btrfs_create_repair_bio(struct inode *inode, struct bio *failed_bio,
 				    struct page *page, int pg_offset, int icsum,
 				    bio_end_io_t *endio_func, void *data);
 int free_io_failure(struct inode *inode, struct io_failure_record *rec);
-#ifdef CONFIG_BTRFS_FS_RUN_SANITY_TESTS
-noinline u64 find_lock_delalloc_range(struct inode *inode,
-				      struct extent_io_tree *tree,
-				      struct page *locked_page, u64 *start,
-				      u64 *end, u64 max_bytes);
-#endif
+u64 find_lock_delalloc_range(struct inode *inode,
+			     struct extent_io_tree *tree,
+			     void *locked_page, u64 *start,
+			     u64 *end, u64 max_bytes);
 struct extent_buffer *alloc_test_extent_buffer(struct btrfs_fs_info *fs_info,
 					       u64 start);
 #endif

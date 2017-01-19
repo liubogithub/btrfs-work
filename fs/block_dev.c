@@ -2016,7 +2016,8 @@ static int blkdev_writepages(struct address_space *mapping,
 	if (dax_mapping(mapping)) {
 		struct block_device *bdev = I_BDEV(mapping->host);
 
-		return dax_writeback_mapping_range(mapping, bdev, wbc);
+		/* block dev doesn't have iomap ops */
+		return dax_writeback_mapping_range(mapping, bdev, wbc, NULL);
 	}
 	return generic_writepages(mapping, wbc);
 }

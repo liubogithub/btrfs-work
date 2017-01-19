@@ -3870,6 +3870,7 @@ void btrfs_dec_nocow_writers(struct btrfs_fs_info *fs_info, u64 bytenr)
 	 * to btrfs_inc_nocow_writers()
 	 */
 	btrfs_put_block_group(bg);
+	ASSERT(atomic_read(&bg->count) > 1);
 	btrfs_put_block_group(bg);
 }
 
@@ -6453,6 +6454,8 @@ void btrfs_dec_block_group_reservations(struct btrfs_fs_info *fs_info,
 	ASSERT(bg);
 	if (atomic_dec_and_test(&bg->reservations))
 		wake_up_atomic_t(&bg->reservations);
+
+	ASSERT(atomic_read(&bg->count) > 1);
 	btrfs_put_block_group(bg);
 }
 

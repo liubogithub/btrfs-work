@@ -5,6 +5,7 @@
 #include <linux/mm.h>
 #include <linux/radix-tree.h>
 #include <asm/pgtable.h>
+#include <linux/iomap.h>
 
 struct iomap_ops;
 
@@ -36,6 +37,11 @@ static inline void *dax_radix_locked_entry(sector_t sector, unsigned long flags)
 			RADIX_DAX_ENTRY_LOCK);
 }
 
+static inline sector_t dax_iomap_sector(struct iomap *iomap, loff_t pos)
+{
+	return iomap->blkno + (((pos & PAGE_MASK) - iomap->offset) >> 9);
+}
+
 ssize_t dax_iomap_rw(struct kiocb *iocb, struct iov_iter *iter,
 		struct iomap_ops *ops);
 int dax_iomap_fault(struct vm_area_struct *vma, struct vm_fault *vmf,
@@ -46,6 +52,50 @@ int dax_invalidate_mapping_entry_sync(struct address_space *mapping,
 				      pgoff_t index);
 void dax_wake_mapping_entry_waiter(struct address_space *mapping,
 		pgoff_t index, void *entry, bool wake_all);
+void *get_unlocked_mapping_entry(struct address_space *mapping, pgoff_t index,
+				 void ***slotp);
+void put_locked_mapping_entry(struct address_space *mapping, pgoff_t index,
+			      void *entry);
+void put_unlocked_mapping_entry(struct address_space *mapping, pgoff_t index,
+				void *entry);
+
+/*
+ * Mark the given slot is locked. The function must be called with
+ * mapping->tree_lock held
+ */
+static inline void *lock_slot(struct address_space *mapping, void **slot)
+{
+	unsigned long entry = (unsigned long)
+		radix_tree_deref_slot_protected(slot, &mapping->tree_lock);
+
+	entry |= RADIX_DAX_ENTRY_LOCK;
+	radix_tree_replace_slot(&mapping->page_tree, slot, (void *)entry);
+	return (void *)entry;
+}
+
+/*
+ * Mark the given slot is unlocked. The function must be called with
+ * mapping->tree_lock held
+ */
+static inline void *unlock_slot(struct address_space *mapping, void **slot)
+{
+	unsigned long entry = (unsigned long)
+		radix_tree_deref_slot_protected(slot, &mapping->tree_lock);
+
+	entry &= ~(unsigned long)RADIX_DAX_ENTRY_LOCK;
+	radix_tree_replace_slot(&mapping->page_tree, slot, (void *)entry);
+	return (void *)entry;
+}
+
+static inline int dax_is_zero_entry(void *entry)
+{
+	return (unsigned long)entry & RADIX_DAX_HZP;
+}
+
+static inline int dax_is_empty_entry(void *entry)
+{
+	return (unsigned long)entry & RADIX_DAX_EMPTY;
+}
 
 #ifdef CONFIG_FS_DAX
 struct page *read_dax_sector(struct block_device *bdev, sector_t n);
@@ -99,5 +149,7 @@ static inline bool dax_mapping(struct address_space *mapping)
 
 struct writeback_control;
 int dax_writeback_mapping_range(struct address_space *mapping,
-		struct block_device *bdev, struct writeback_control *wbc);
+				struct block_device *bdev,
+				struct writeback_control *wbc,
+				void *ops);
 #endif

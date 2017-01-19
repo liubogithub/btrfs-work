@@ -495,19 +495,12 @@ int btrfs_parse_options(struct btrfs_fs_info *info, char *options,
 			if (ret)
 				goto out;
 
-			/* dax inode doesn't need inline. */
-			info->max_inline = 0;
-			btrfs_info(info, "max_inline at %llu", info->max_inline);
-
 			btrfs_clear_opt(info->mount_opt, COMPRESS);
 			btrfs_clear_opt(info->mount_opt, FORCE_COMPRESS);
-			btrfs_set_opt(info->mount_opt, NODATACOW);
 			btrfs_set_opt(info->mount_opt, NODATASUM);
 			btrfs_info(info,
-				   "setting nodatacow, compression disabled");
-
-			/* dax doesn't expect other fancy options. */
-			goto out;
+				   "setting nodatasum, compression disabled");
+			break;
 #endif
 		case Opt_nodatacow:
 			if (!btrfs_test_opt(info, NODATACOW)) {

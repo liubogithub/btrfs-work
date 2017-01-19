@@ -2636,7 +2636,7 @@ static int ext4_writepages(struct address_space *mapping,
 
 	if (dax_mapping(mapping)) {
 		ret = dax_writeback_mapping_range(mapping, inode->i_sb->s_bdev,
-						  wbc);
+						  wbc, &ext4_iomap_ops);
 		goto out_writepages;
 	}
 

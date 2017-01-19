@@ -162,7 +162,6 @@ void btrfs_update_iflags(struct inode *inode)
 	if (btrfs_test_opt(ip->root->fs_info, DAX) &&
 	    S_ISREG(inode->i_mode) &&
 	    !btrfs_is_free_space_inode(inode) &&
-	    (ip->flags & BTRFS_INODE_NODATACOW) &&
 	    !(ip->flags & BTRFS_INODE_COMPRESS))
 		new_fl |= S_DAX;
 

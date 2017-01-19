@@ -952,7 +952,7 @@ ext2_writepages(struct address_space *mapping, struct writeback_control *wbc)
 	if (dax_mapping(mapping)) {
 		return dax_writeback_mapping_range(mapping,
 						   mapping->host->i_sb->s_bdev,
-						   wbc);
+						   wbc, &ext2_iomap_ops);
 	}
 #endif
 

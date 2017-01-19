@@ -87,15 +87,6 @@ static int dax_is_pte_entry(void *entry)
 	return !((unsigned long)entry & RADIX_DAX_PMD);
 }
 
-static int dax_is_zero_entry(void *entry)
-{
-	return (unsigned long)entry & RADIX_DAX_HZP;
-}
-
-static int dax_is_empty_entry(void *entry)
-{
-	return (unsigned long)entry & RADIX_DAX_EMPTY;
-}
 
 struct page *read_dax_sector(struct block_device *bdev, sector_t n)
 {
@@ -174,33 +165,6 @@ static inline int slot_locked(struct address_space *mapping, void **slot)
 	return entry & RADIX_DAX_ENTRY_LOCK;
 }
 
-/*
- * Mark the given slot is locked. The function must be called with
- * mapping->tree_lock held
- */
-static inline void *lock_slot(struct address_space *mapping, void **slot)
-{
-	unsigned long entry = (unsigned long)
-		radix_tree_deref_slot_protected(slot, &mapping->tree_lock);
-
-	entry |= RADIX_DAX_ENTRY_LOCK;
-	radix_tree_replace_slot(&mapping->page_tree, slot, (void *)entry);
-	return (void *)entry;
-}
-
-/*
- * Mark the given slot is unlocked. The function must be called with
- * mapping->tree_lock held
- */
-static inline void *unlock_slot(struct address_space *mapping, void **slot)
-{
-	unsigned long entry = (unsigned long)
-		radix_tree_deref_slot_protected(slot, &mapping->tree_lock);
-
-	entry &= ~(unsigned long)RADIX_DAX_ENTRY_LOCK;
-	radix_tree_replace_slot(&mapping->page_tree, slot, (void *)entry);
-	return (void *)entry;
-}
 
 /*
  * Lookup entry in radix tree, wait for it to become unlocked if it is
@@ -211,8 +175,8 @@ static inline void *unlock_slot(struct address_space *mapping, void **slot)
  *
  * The function must be called with mapping->tree_lock held.
  */
-static void *get_unlocked_mapping_entry(struct address_space *mapping,
-					pgoff_t index, void ***slotp)
+void *get_unlocked_mapping_entry(struct address_space *mapping,
+				 pgoff_t index, void ***slotp)
 {
 	void *entry, **slot;
 	struct wait_exceptional_entry_queue ewait;
@@ -258,8 +222,8 @@ static void dax_unlock_mapping_entry(struct address_space *mapping,
 	dax_wake_mapping_entry_waiter(mapping, index, entry, false);
 }
 
-static void put_locked_mapping_entry(struct address_space *mapping,
-				     pgoff_t index, void *entry)
+void put_locked_mapping_entry(struct address_space *mapping,
+			      pgoff_t index, void *entry)
 {
 	if (!radix_tree_exceptional_entry(entry)) {
 		unlock_page(entry);
@@ -273,7 +237,7 @@ static void put_locked_mapping_entry(struct address_space *mapping,
  * Called when we are done with radix tree entry we looked up via
  * get_unlocked_mapping_entry() and which we didn't lock in the end.
  */
-static void put_unlocked_mapping_entry(struct address_space *mapping,
+void put_unlocked_mapping_entry(struct address_space *mapping,
 				       pgoff_t index, void *entry)
 {
 	if (!radix_tree_exceptional_entry(entry))
@@ -687,8 +651,9 @@ pgoff_address(pgoff_t pgoff, struct vm_area_struct *vma)
 }
 
 /* Walk all mappings of a given index of a file and writeprotect them */
-static void dax_mapping_entry_mkclean(struct address_space *mapping,
-				      pgoff_t index, unsigned long pfn)
+static void dax_mapping_entry_update(struct address_space *mapping,
+				     pgoff_t index, unsigned long pfn,
+				     pfn_t new_pfn, int cow)
 {
 	struct vm_area_struct *vma;
 	pte_t *ptep;
@@ -716,6 +681,16 @@ static void dax_mapping_entry_mkclean(struct address_space *mapping,
 
 		flush_cache_page(vma, address, pfn);
 		pte = ptep_clear_flush(vma, address, ptep);
+		if (cow) {
+			/* OK...crazy stuff starts */
+			pgprot_t pgprot = vma->vm_page_prot;
+
+			track_pfn_insert(vma, &pgprot, new_pfn);
+
+			/* assuming that pte is always special */
+			pte = pte_mkspecial(pfn_t_pte(new_pfn, pgprot));
+		}
+
 		pte = pte_wrprotect(pte);
 		pte = pte_mkclean(pte);
 		set_pte_at(vma->vm_mm, address, ptep, pte);
@@ -730,12 +705,17 @@ unlock:
 }
 
 static int dax_writeback_one(struct block_device *bdev,
-		struct address_space *mapping, pgoff_t index, void *entry)
+			     struct address_space *mapping, pgoff_t index,
+			     void *entry, struct iomap_ops *ops)
 {
 	struct radix_tree_root *page_tree = &mapping->page_tree;
+	struct inode *inode = mapping->host;
 	struct blk_dax_ctl dax;
 	void *entry2, **slot;
+	unsigned long orig_pfn;
+	unsigned long sector;
 	int ret = 0;
+	int cow = 0;
 
 	/*
 	 * A page got tagged dirty in DAX mapping? Something is seriously
@@ -777,6 +757,65 @@ static int dax_writeback_one(struct block_device *bdev,
 	radix_tree_tag_clear(page_tree, index, PAGECACHE_TAG_TOWRITE);
 	spin_unlock_irq(&mapping->tree_lock);
 
+	/* save these since they might be overwritten by iomap_cow */
+	sector = dax_radix_sector(entry);
+	/* A temporary map to fetch the current dax.pfn */
+	dax.sector = sector;
+	dax.size = PAGE_SIZE << dax_radix_order(entry);
+	ret = dax_map_atomic(bdev, &dax);
+	if (ret) {
+		put_locked_mapping_entry(mapping, index, entry);
+		return -EIO;
+	}
+	dax_unmap_atomic(bdev, &dax);
+	/* XXX: check if this works */
+	orig_pfn = pfn_t_to_pfn(dax.pfn);
+
+	if (ops && ops->iomap_cow) {
+		unsigned long flags;
+		loff_t pos = (loff_t)index << PAGE_SHIFT;
+		struct iomap iomap = { 0 };
+		void *new_entry;
+
+		/* we've reserved space in ->pfn_mkwrite, error couldn't be ENOSPC */
+		/* XXX: save PMD for later to deal with */
+		WARN_ON(dax.size != PAGE_SIZE);
+
+		ret = ops->iomap_cow(inode, entry, index, &iomap);
+		if (ret) {
+			put_locked_mapping_entry(mapping, index, entry);
+			return ret;
+		}
+
+		/* we now have a new sector. */
+		sector = dax_iomap_sector(&iomap, pos);
+
+		/* flags could be RADIX_DAX_PMD */
+		flags = 0;
+		new_entry = dax_radix_locked_entry(sector, flags);
+
+		/* swap this new_entry into radix tree */
+		if (1) {
+			struct radix_tree_node *node;
+			void **entry_slot;
+			void *tmp;
+
+			spin_lock_irq(&mapping->tree_lock);
+
+			tmp = __radix_tree_lookup(page_tree, index, &node, &entry_slot);
+			WARN_ON(tmp != entry);
+			WARN_ON(slot != entry_slot);
+			__radix_tree_replace(page_tree, node, slot, new_entry, NULL, NULL);
+
+			/* we need to set dirty tag to keep new_entry same with the old one */
+			radix_tree_tag_set(page_tree, index, PAGECACHE_TAG_DIRTY);
+
+			spin_unlock_irq(&mapping->tree_lock);
+		}
+
+		cow = 1;
+	}
+
 	/*
 	 * Even if dax_writeback_mapping_range() was given a wbc->range_start
 	 * in the middle of a PMD, the 'index' we are given will be aligned to
@@ -784,7 +823,7 @@ static int dax_writeback_one(struct block_device *bdev,
 	 * 'entry'.  This allows us to flush for PMD_SIZE and not have to
 	 * worry about partial PMD writebacks.
 	 */
-	dax.sector = dax_radix_sector(entry);
+	dax.sector = sector;
 	dax.size = PAGE_SIZE << dax_radix_order(entry);
 
 	/*
@@ -793,8 +832,7 @@ static int dax_writeback_one(struct block_device *bdev,
 	 */
 	ret = dax_map_atomic(bdev, &dax);
 	if (ret < 0) {
-		put_locked_mapping_entry(mapping, index, entry);
-		return ret;
+		goto out_unlock;
 	}
 
 	if (WARN_ON_ONCE(ret < dax.size)) {
@@ -802,7 +840,8 @@ static int dax_writeback_one(struct block_device *bdev,
 		goto unmap;
 	}
 
-	dax_mapping_entry_mkclean(mapping, index, pfn_t_to_pfn(dax.pfn));
+	/* XXX: use flags? */
+	dax_mapping_entry_update(mapping, index, orig_pfn, dax.pfn, cow);
 	wb_cache_pmem(dax.addr, dax.size);
 	/*
 	 * After we have flushed the cache, we can clear the dirty tag. There
@@ -815,6 +854,13 @@ static int dax_writeback_one(struct block_device *bdev,
 	spin_unlock_irq(&mapping->tree_lock);
  unmap:
 	dax_unmap_atomic(bdev, &dax);
+out_unlock:
+	if (ops && ops->iomap_end) {
+		/* XXX: move this out */
+		loff_t pos = (loff_t)index << PAGE_SHIFT;
+
+		ret = ops->iomap_end(inode, pos, PAGE_SIZE, PAGE_SIZE, 0, NULL);
+	}
 	put_locked_mapping_entry(mapping, index, entry);
 	return ret;
 
@@ -830,7 +876,9 @@ static int dax_writeback_one(struct block_device *bdev,
  * on persistent storage prior to completion of the operation.
  */
 int dax_writeback_mapping_range(struct address_space *mapping,
-		struct block_device *bdev, struct writeback_control *wbc)
+				struct block_device *bdev,
+				struct writeback_control *wbc,
+				void *ops)
 {
 	struct inode *inode = mapping->host;
 	pgoff_t start_index, end_index;
@@ -866,7 +914,7 @@ int dax_writeback_mapping_range(struct address_space *mapping,
 			}
 
 			ret = dax_writeback_one(bdev, mapping, indices[i],
-					pvec.pages[i]);
+						pvec.pages[i], ops);
 			if (ret < 0)
 				return ret;
 		}
@@ -970,10 +1018,6 @@ int __dax_zero_page_range(struct block_device *bdev, sector_t sector,
 EXPORT_SYMBOL_GPL(__dax_zero_page_range);
 
 #ifdef CONFIG_FS_IOMAP
-static sector_t dax_iomap_sector(struct iomap *iomap, loff_t pos)
-{
-	return iomap->blkno + (((pos & PAGE_MASK) - iomap->offset) >> 9);
-}
 
 static loff_t
 dax_iomap_actor(struct inode *inode, loff_t pos, loff_t length, void *data,

@@ -2353,10 +2353,121 @@ static int btrfs_filemap_pfn_mkwrite(struct vm_area_struct *vma,
 
 	down_read(&BTRFS_I(inode)->mmap_sem);
 	size = (i_size_read(inode) + PAGE_SIZE - 1) >> PAGE_SHIFT;
-	if (vmf->pgoff >= size)
+	if (vmf->pgoff >= size) {
 		ret = VM_FAULT_SIGBUS;
-	else
-		ret = dax_pfn_mkwrite(vma, vmf);
+	} else {
+		u64 start;
+		u64 end;
+		struct extent_state *cached_state = NULL;
+		struct extent_io_tree *io_tree = &BTRFS_I(inode)->io_tree;
+		struct btrfs_ordered_extent *ordered;
+		struct btrfs_fs_info *fs_info = BTRFS_I(inode)->root->fs_info;
+		struct address_space *mapping = inode->i_mapping;
+		void *entry;
+		void **slot;
+		pgoff_t index = vmf->pgoff;
+		unsigned int clear_bits;
+
+		start = index << PAGE_SHIFT;
+		end = start + PAGE_SIZE - 1;
+
+		/*
+		 * some ugly reservation stuff, the idea is that we reserve
+		 * space as how page_mkwrite does, and we do delay allocation
+		 * until writeback.
+		 */
+		ret = btrfs_delalloc_reserve_space(inode, start, PAGE_SIZE);
+		if (ret) {
+			goto out_delalloc;
+		}
+retry:
+		/* fork from dax_pfn_mkwrite */
+		spin_lock_irq(&mapping->tree_lock);
+		entry = get_unlocked_mapping_entry(mapping, index, &slot);
+		if (!entry || !radix_tree_exceptional_entry(entry)) {
+			if (entry)
+				put_unlocked_mapping_entry(mapping, index, entry);
+			spin_unlock_irq(&mapping->tree_lock);
+			ret = VM_FAULT_NOPAGE;  /* XXX: rework error handling */
+			goto out_delalloc;
+		}
+
+		entry = lock_slot(mapping, slot);
+		spin_unlock_irq(&mapping->tree_lock);
+
+		/* now we're protected by entry lock (just see it as a page lock) */
+
+		/* we always do 4k-aligned fault here */
+		lock_extent_bits(io_tree, start, end, &cached_state);
+		ordered = btrfs_lookup_ordered_extent(inode, start);
+		if (ordered) {
+			/* unlock everything and wait for ordered and retry */
+			unlock_extent_cached(io_tree, start, end, &cached_state, GFP_NOFS);
+
+			put_locked_mapping_entry(mapping, index, entry);
+
+			btrfs_start_ordered_extent(inode, ordered, 1);
+			btrfs_put_ordered_extent(ordered);
+			goto retry;
+		}
+
+		/* blocksize < PAGE_SIZE is not suitable for DAX */
+
+		/*
+		 * if this pfn_mkwrite has race with other write faults or other
+		 * writes from standard IO path, then we need clear any delalloc
+		 * bits for the range.
+		 */
+
+		/*
+		 * seems that EXTENT_DIRTY is not any more for inode's io_tree,
+		 * can we drop it?
+		 */
+		clear_bits = EXTENT_DIRTY | EXTENT_DELALLOC |
+			     EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG;
+		clear_extent_bit(io_tree, start, end, clear_bits, 0, 0,
+				 &cached_state, GFP_NOFS);
+
+		/* lets set delalloc bits and dirty this entry */
+		ret = btrfs_set_extent_delalloc(inode, start, end, &cached_state, 0);
+		if (ret) { /* ENOMEM or EEXIST */
+			goto out_err;
+		}
+
+		spin_lock_irq(&mapping->tree_lock);
+		radix_tree_tag_set(&mapping->page_tree, index, PAGECACHE_TAG_DIRTY);
+		spin_unlock_irq(&mapping->tree_lock);
+
+		BTRFS_I(inode)->last_trans = fs_info->generation;
+		BTRFS_I(inode)->last_sub_trans = BTRFS_I(inode)->root->log_transid;
+		BTRFS_I(inode)->last_log_commit = BTRFS_I(inode)->root->last_log_commit;
+
+		unlock_extent_cached(io_tree, start, end, &cached_state, GFP_NOFS);
+		/*
+		 * see dax_pfn_mkwrite for comments about why there's no return
+		 * value.
+		 */
+		finish_mkwrite_fault(vmf);
+
+		put_locked_mapping_entry(mapping, index, entry);
+		ret = VM_FAULT_NOPAGE;
+		goto out_unlock;
+
+out_err:
+		unlock_extent_cached(io_tree, start, end, &cached_state, GFP_NOFS);
+
+		put_locked_mapping_entry(mapping, index, entry);
+
+out_delalloc:
+		btrfs_delalloc_release_space(inode, start, end);
+	}
+
+out_unlock:
+	if (ret == -ENOMEM)
+		ret = VM_FAULT_OOM;
+	else if (ret != VM_FAULT_NOPAGE)
+		ret = VM_FAULT_SIGBUS;
+
 	up_read(&BTRFS_I(inode)->mmap_sem);
 
 	sb_end_pagefault(sb);

@@ -69,6 +69,14 @@ struct iomap_ops {
 	 */
 	int (*iomap_end)(struct inode *inode, loff_t pos, loff_t length,
 			ssize_t written, unsigned flags, struct iomap *iomap);
+
+	/*
+	 * Do delalloc copy-on-write.
+	 * iomap will have the start offset of the allocated contiguous blocks.
+	 * The actual length is returned in iomap->length.
+	 */
+	int (*iomap_cow)(struct inode *inode, void *entry, pgoff_t pgoff,
+			 struct iomap *iomap);
 };
 
 ssize_t iomap_file_buffered_write(struct kiocb *iocb, struct iov_iter *from,

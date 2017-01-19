@@ -1656,6 +1656,88 @@ repeat:
 EXPORT_SYMBOL(find_get_pages_tag);
 
 /**
+ * find_get_entries_contig - gang contiguous pagecache lookup
+ * @mapping:	The address_space to search
+ * @index:	The starting page index
+ * @nr_entries:	The maximum number of entries
+ * @entries:	Where the resulting entries are placed
+ * @indices:    the cache indices corresponding to the entries in @entries
+ *
+ * find_get_entries_contig() works exactly like find_get_entries(), except
+ * that the returned number of entries are guaranteed to be contiguous.
+ *
+ * find_get_entries_contig() returns the number of entries which were found.
+ */
+unsigned find_get_entries_contig(struct address_space *mapping, pgoff_t index,
+				 unsigned int nr_entries, struct page **entries,
+				 pgoff_t *indices)
+{
+	struct radix_tree_iter iter;
+	void **slot;
+	unsigned int ret = 0;
+
+	if (unlikely(!nr_entries))
+		return 0;
+
+	rcu_read_lock();
+	radix_tree_for_each_contig(slot, &mapping->page_tree, &iter, index) {
+		struct page *head, *page;
+repeat:
+		page = radix_tree_deref_slot(slot);
+		/* The hole, there no reason to continue */
+		if (unlikely(!page))
+			break;
+
+		if (radix_tree_exception(page)) {
+			if (radix_tree_deref_retry(page)) {
+				slot = radix_tree_iter_retry(&iter);
+				continue;
+			}
+			/*
+			 * A shadow entry of a recently evicted page, a swap
+			 * entry from shmem/tmpfs or a DAX entry.  Return it
+			 * without attempting to raise page count.
+			 */
+			goto export;
+		}
+
+		head = compound_head(page);
+		if (!page_cache_get_speculative(head))
+			goto repeat;
+
+		/* The page was split under us? */
+		if (compound_head(page) != head) {
+			put_page(head);
+			goto repeat;
+		}
+
+		/* Has the page moved? */
+		if (unlikely(page != *slot)) {
+			put_page(head);
+			goto repeat;
+		}
+
+		/*
+		 * must check mapping and index after taking the ref.
+		 * otherwise we can get both false positives and false
+		 * negatives, which is just confusing to the caller.
+		 */
+		if (page->mapping == NULL || page_to_pgoff(page) != iter.index) {
+			put_page(page);
+			break;
+		}
+export:
+		indices[ret] = iter.index;
+		entries[ret] = page;
+		if (++ret == nr_entries)
+			break;
+	}
+	rcu_read_unlock();
+	return ret;
+}
+EXPORT_SYMBOL(find_get_entries_contig);
+
+/**
  * find_get_entries_tag - find and return entries that match @tag
  * @mapping:	the address_space to search
  * @start:	the starting page cache index
