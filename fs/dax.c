@@ -763,10 +763,16 @@ static int dax_writeback_one(struct block_device *bdev,
 	dax.sector = sector;
 	dax.size = PAGE_SIZE << dax_radix_order(entry);
 	ret = dax_map_atomic(bdev, &dax);
-	if (ret) {
+	if (ret < 0) {
 		put_locked_mapping_entry(mapping, index, entry);
+		return ret;
+	}
+
+	if (WARN_ON_ONCE(ret < dax.size)) {
+		dax_unmap_atomic(bdev, &dax);
 		return -EIO;
 	}
+
 	dax_unmap_atomic(bdev, &dax);
 	/* XXX: check if this works */
 	orig_pfn = pfn_t_to_pfn(dax.pfn);
@@ -852,14 +858,14 @@ static int dax_writeback_one(struct block_device *bdev,
 	spin_lock_irq(&mapping->tree_lock);
 	radix_tree_tag_clear(page_tree, index, PAGECACHE_TAG_DIRTY);
 	spin_unlock_irq(&mapping->tree_lock);
- unmap:
+unmap:
 	dax_unmap_atomic(bdev, &dax);
 out_unlock:
 	if (ops && ops->iomap_end) {
 		/* XXX: move this out */
 		loff_t pos = (loff_t)index << PAGE_SHIFT;
 
-		ret = ops->iomap_end(inode, pos, PAGE_SIZE, PAGE_SIZE, 0, NULL);
+		ret = ops->iomap_end(inode, pos, PAGE_SIZE, PAGE_SIZE, IOMAP_WRITE, NULL);
 	}
 	put_locked_mapping_entry(mapping, index, entry);
 	return ret;

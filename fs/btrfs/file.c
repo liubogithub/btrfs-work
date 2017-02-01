@@ -2371,6 +2371,7 @@ static int btrfs_filemap_pfn_mkwrite(struct vm_area_struct *vma,
 		start = index << PAGE_SHIFT;
 		end = start + PAGE_SIZE - 1;
 
+		trace_printk("ino 0x%llx start 0x%llx end 0x%llx\n", btrfs_ino(inode), start, end);
 		/*
 		 * some ugly reservation stuff, the idea is that we reserve
 		 * space as how page_mkwrite does, and we do delay allocation
@@ -2406,6 +2407,7 @@ retry:
 
 			put_locked_mapping_entry(mapping, index, entry);
 
+			trace_printk("flush ordered ino 0x%llx start 0x%llx end 0x%llx ordered 0x%llx 0x%llx\n", btrfs_ino(inode), start, end, ordered->file_offset, ordered->len);
 			btrfs_start_ordered_extent(inode, ordered, 1);
 			btrfs_put_ordered_extent(ordered);
 			goto retry;

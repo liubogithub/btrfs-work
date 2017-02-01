@@ -1563,6 +1563,8 @@ __unlock_for_delalloc_entries(struct inode *inode, u64 start, u64 end)
 	int i;
 	int nr;
 
+	trace_printk("entry 0x%llx 0x%llx\n", start, end);
+
 	start_index = start >> PAGE_SHIFT;
 	end_index = end >> PAGE_SHIFT;
 
@@ -1580,6 +1582,7 @@ __unlock_for_delalloc_entries(struct inode *inode, u64 start, u64 end)
 			this_entry = pages[i];
 			this_index = indices[i];
 
+			trace_printk("this_index %d index %d\n", this_index, index);
 			if (this_index != index) {
 				put_locked_mapping_entry(inode->i_mapping, this_index, this_entry);
 			}
@@ -1588,6 +1591,7 @@ __unlock_for_delalloc_entries(struct inode *inode, u64 start, u64 end)
 		start_index += nr;
 		cond_resched();
 	}
+	trace_printk("exit 0x%llx 0x%llx\n", start, end);
 }
 
 static noinline void __unlock_for_delalloc(struct inode *inode,
@@ -1620,6 +1624,7 @@ static noinline void __unlock_for_delalloc(struct inode *inode,
 		index += ret;
 		cond_resched();
 	}
+
 }
 
 /*
@@ -1645,7 +1650,7 @@ lock_delalloc_entries(struct inode *inode, void *locked_entry, u64 start, u64 en
 
 	start_index = start >> PAGE_SHIFT;
 	end_index = end >> PAGE_SHIFT;
-
+	trace_printk(" entry 0x%llx 0x%llx\n", start, end);
 	if (start_index == end_index)
 		return 0;
 
@@ -1665,6 +1670,7 @@ lock_delalloc_entries(struct inode *inode, void *locked_entry, u64 start, u64 en
 			this_index = indices[i];
 			this_entry = pages[i];
 
+			trace_printk("this_index %d index %d\n", this_index, index);
 			/*
 			 * entry at this_index has bene locked by caller
 			 */
@@ -1704,6 +1710,7 @@ lock_delalloc_entries(struct inode *inode, void *locked_entry, u64 start, u64 en
 					goto done;
 				}
 				entry = lock_slot(mapping, slot);
+				trace_printk("offset %d\n", dax_radix_sector(entry) << 9);
 				spin_unlock_irq(&mapping->tree_lock);
 			} /* check if pages are still valid with lock */
 			pages_locked++;
@@ -1719,6 +1726,8 @@ done:
 		__unlock_for_delalloc(inode, locked_entry, start,
 				      ((u64)(start_index + pages_locked - 1)) << PAGE_SHIFT);
 	}
+	trace_printk("exit 0x%llx 0x%llx\n", start, end);
+
 	return ret;
 }
 

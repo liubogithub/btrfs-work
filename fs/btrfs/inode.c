@@ -1046,6 +1046,7 @@ static noinline int cow_file_range(struct inode *inode,
 		cur_alloc_size = ins.offset;
 		ret = btrfs_add_ordered_extent(inode, start, ins.objectid,
 					       ram_size, cur_alloc_size, 0);
+		trace_printk("ino 0x%llx start 0x%llx phy 0x%llx len 0x%llx ret %d\n", btrfs_ino(inode), start, ins.objectid, cur_alloc_size, ret);
 		if (ret)
 			goto out_drop_extent_cache;
 
@@ -7996,6 +7997,7 @@ static int btrfs_em_to_iomap(struct btrfs_fs_info *fs_info, u64 start, u64 len,
 	/* this requires sector */
 	iomap->blkno = stripe->physical >> 9;
 	iomap->length = len;
+	trace_printk("rw %d offset 0x%llx len 0x%llx block_start 0x%llx phy 0x%llx\n", rw, start, len, logical, stripe->physical);
 
 	btrfs_put_bbio(bbio);
 	return 0;
@@ -11151,9 +11153,14 @@ static noinline int btrfs_file_iomap_end(struct inode *inode, loff_t offset,
 		 * we don't span IO over ordered_extent.
 		 */
 		ret = btrfs_dec_test_ordered_pending(inode, &ordered_extent, curr, len, uptodate);
-		if (!ret && ordered_extent)
-			trace_printk("ordered_extent 0x%llx 0x%llx\n", ordered_extent->file_offset, ordered_extent->len);
-		ASSERT(ret);
+		if (!ret) {
+			/*
+			 * this ordered extent span over several
+			 * pages, and others have not been processed
+			 */
+			trace_printk("this ordered extent is not yet completed\n");
+			return 0;
+		}
 
 		btrfs_init_work(&ordered_extent->work, func, finish_ordered_fn, NULL, NULL);
 		btrfs_queue_work(wq, &ordered_extent->work);
@@ -11195,7 +11202,7 @@ btrfs_file_iomap_cow(struct inode *inode, void *entry, pgoff_t pgoff, struct iom
 						 &delalloc_start,
 						 &delalloc_end,
 						 BTRFS_MAX_EXTENT_SIZE);
-		trace_printk("find_delalloc 0x%llx 0x%llx ret %d", delalloc_start, delalloc_end, nr_delalloc);
+		trace_printk("find_delalloc 0x%llx 0x%llx ret %d\n", delalloc_start, delalloc_end, nr_delalloc);
 		if (nr_delalloc == 0) {
 			delalloc_start = delalloc_end + 1;
 			continue;
@@ -11276,7 +11283,7 @@ btrfs_file_iomap_cow(struct inode *inode, void *entry, pgoff_t pgoff, struct iom
 			iomap->flags = 0;
 			iomap->offset = (loff_t)pos;
 			iomap->bdev = stripe->dev->bdev;
-			trace_printk("finish em to iomap: 0x%llx 0x%llx blkno 0x%llx\n", pos, pos + iosize, iomap->blkno);
+			trace_printk("finish em to iomap: 0x%llx 0x%llx block_start 0x%llx phy 0x%llx\n", pos, pos + iosize, block_start, stripe->physical);
 
 			btrfs_put_bbio(bbio);
 		}
@@ -11287,6 +11294,7 @@ btrfs_file_iomap_cow(struct inode *inode, void *entry, pgoff_t pgoff, struct iom
 		cur += iosize;
 		pos += iosize;
 	}
+	trace_printk("exit\n");	
 	return ret;
 }
 
