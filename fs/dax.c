@@ -716,6 +716,7 @@ static int dax_writeback_one(struct block_device *bdev,
 	unsigned long sector;
 	int ret = 0;
 	int cow = 0;
+	struct page *page = NULL;
 
 	/*
 	 * A page got tagged dirty in DAX mapping? Something is seriously
@@ -773,6 +774,9 @@ static int dax_writeback_one(struct block_device *bdev,
 		return -EIO;
 	}
 
+	/* firstly flush the original pfn to ensure we have data to copy from. */
+	wb_cache_pmem(dax.addr, dax.size);
+
 	dax_unmap_atomic(bdev, &dax);
 	/* XXX: check if this works */
 	orig_pfn = pfn_t_to_pfn(dax.pfn);
@@ -782,6 +786,12 @@ static int dax_writeback_one(struct block_device *bdev,
 		loff_t pos = (loff_t)index << PAGE_SHIFT;
 		struct iomap iomap = { 0 };
 		void *new_entry;
+
+		/*
+		 * read this dax memory out to a temp page.
+		 * !!!!!: Don't forget to free this page
+		 */
+		page = read_dax_sector(bdev, sector);
 
 		/* we've reserved space in ->pfn_mkwrite, error couldn't be ENOSPC */
 		/* XXX: save PMD for later to deal with */
@@ -844,6 +854,13 @@ static int dax_writeback_one(struct block_device *bdev,
 	if (WARN_ON_ONCE(ret < dax.size)) {
 		ret = -EIO;
 		goto unmap;
+	}
+
+	if (cow) {
+		/* copy data to our new pfn */
+		memcpy_to_pmem(dax.addr, page_address(page), PAGE_SIZE);
+		/* free this page */
+		put_page(page);
 	}
 
 	/* XXX: use flags? */
