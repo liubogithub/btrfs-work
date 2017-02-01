@@ -716,7 +716,6 @@ static int dax_writeback_one(struct block_device *bdev,
 	unsigned long sector;
 	int ret = 0;
 	int cow = 0;
-	struct page *page = NULL;
 
 	/*
 	 * A page got tagged dirty in DAX mapping? Something is seriously
@@ -787,12 +786,6 @@ static int dax_writeback_one(struct block_device *bdev,
 		struct iomap iomap = { 0 };
 		void *new_entry;
 
-		/*
-		 * read this dax memory out to a temp page.
-		 * !!!!!: Don't forget to free this page
-		 */
-		page = read_dax_sector(bdev, sector);
-
 		/* we've reserved space in ->pfn_mkwrite, error couldn't be ENOSPC */
 		/* XXX: save PMD for later to deal with */
 		WARN_ON(dax.size != PAGE_SIZE);
@@ -832,6 +825,33 @@ static int dax_writeback_one(struct block_device *bdev,
 		cow = 1;
 	}
 
+	if (cow) {
+		struct blk_dax_ctl new_dax = {
+			.sector = sector,
+			.size = dax.size,
+		};
+
+		/* firstly map the orig pfn */
+		ret = dax_map_atomic(bdev, &dax);
+		if (ret < 0)
+			goto out_unlock;
+		/* map the new pfn */
+		ret = dax_map_atomic(bdev, &new_dax);
+		if (ret < 0) {
+			dax_unmap_atomic(bdev, &dax);
+			goto out_unlock;
+		}
+
+		/* yes, we should use pmem's version memcpy */
+		BUG_ON(dax.size != PAGE_SIZE);
+		memcpy(new_dax.addr, dax.addr, dax.size);
+
+		/* XXX: any flush is needed here ? */
+
+		dax_unmap_atomic(bdev, &new_dax);
+		dax_unmap_atomic(bdev, &dax);
+	}
+
 	/*
 	 * Even if dax_writeback_mapping_range() was given a wbc->range_start
 	 * in the middle of a PMD, the 'index' we are given will be aligned to
@@ -854,13 +874,6 @@ static int dax_writeback_one(struct block_device *bdev,
 	if (WARN_ON_ONCE(ret < dax.size)) {
 		ret = -EIO;
 		goto unmap;
-	}
-
-	if (cow) {
-		/* copy data to our new pfn */
-		memcpy_to_pmem(dax.addr, page_address(page), PAGE_SIZE);
-		/* free this page */
-		put_page(page);
 	}
 
 	/* XXX: use flags? */
