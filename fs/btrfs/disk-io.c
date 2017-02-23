@@ -296,6 +296,9 @@ static int csum_tree_block(struct btrfs_fs_info *fs_info,
 	u32 crc = ~(u32)0;
 	unsigned long inline_result;
 
+	if (verify && btrfs_fs_incompat(fs_info, SKIPCSUM))
+		return 0;
+
 	len = buf->len - offset;
 	while (len > 0) {
 		err = map_private_extent_buffer(buf, offset, 32,
@@ -408,6 +411,11 @@ static int btrfs_check_super_csum(struct btrfs_fs_info *fs_info,
 		(struct btrfs_super_block *)raw_disk_sb;
 	u16 csum_type = btrfs_super_csum_type(disk_sb);
 	int ret = 0;
+
+	if (btrfs_super_incompat_flags(disk_sb) & BTRFS_FEATURE_INCOMPAT_SKIPCSUM) {
+		btrfs_info(fs_info, "feature SKIPCSUM has been enabled, skip csum checking for superblock and metadata blocks\n");
+		return 0;
+	}
 
 	if (csum_type == BTRFS_CSUM_TYPE_CRC32) {
 		u32 crc = ~(u32)0;
