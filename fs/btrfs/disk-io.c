@@ -3737,7 +3737,7 @@ int write_all_supers(struct btrfs_fs_info *fs_info, int max_mirrors)
 			total_errors++;
 			continue;
 		}
-		if (!dev->in_fs_metadata || !dev->writeable)
+		if (!dev->in_fs_metadata || !dev->writeable || dev->for_cache)
 			continue;
 
 		btrfs_set_stack_device_generation(dev_item, 0);
@@ -3776,7 +3776,7 @@ int write_all_supers(struct btrfs_fs_info *fs_info, int max_mirrors)
 	list_for_each_entry_rcu(dev, head, dev_list) {
 		if (!dev->bdev)
 			continue;
-		if (!dev->in_fs_metadata || !dev->writeable)
+		if (!dev->in_fs_metadata || !dev->writeable || dev->for_cache)
 			continue;
 
 		ret = write_dev_supers(dev, sb, 1, max_mirrors);
