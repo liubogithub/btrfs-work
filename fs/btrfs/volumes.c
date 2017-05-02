@@ -4687,6 +4687,14 @@ static int __btrfs_alloc_chunk(struct btrfs_trans_handle *trans,
 
 		cur = cur->next;
 
+		if (type & BTRFS_BLOCK_GROUP_CACHE) {
+			if (!device->for_cache)
+				continue;
+			trace_printk("find cache device %d raid_index %d\n", device->devid, index);
+			ASSERT(ndevs == 0);
+			ASSERT(index == BTRFS_RAID_SINGLE);
+		}
+
 		if (!device->writeable) {
 			WARN(1, KERN_ERR
 			       "BTRFS: read-only device in alloc_list\n");

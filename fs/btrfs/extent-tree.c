@@ -255,6 +255,9 @@ static int exclude_super_stripes(struct btrfs_fs_info *fs_info,
 	int stripe_len;
 	int i, nr, ret;
 
+	if (cache->flags & BTRFS_BLOCK_GROUP_CACHE)
+		return 0;
+
 	if (cache->key.objectid < BTRFS_SUPER_INFO_OFFSET) {
 		stripe_len = BTRFS_SUPER_INFO_OFFSET - cache->key.objectid;
 		cache->bytes_super += stripe_len;
@@ -4094,6 +4097,9 @@ static u64 get_alloc_profile(struct btrfs_fs_info *fs_info, u64 orig_flags)
 {
 	unsigned seq;
 	u64 flags;
+
+	if (orig_flags & BTRFS_BLOCK_GROUP_CACHE)
+		return orig_flags;
 
 	do {
 		flags = orig_flags;

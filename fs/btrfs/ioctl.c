@@ -2657,6 +2657,7 @@ out:
 static long btrfs_ioctl_add_dev_v2(struct btrfs_fs_info *fs_info, void __user *arg)
 {
 	struct btrfs_ioctl_vol_args_v2 *vol_args;
+	u64 flags;
 	int ret;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -2672,16 +2673,42 @@ static long btrfs_ioctl_add_dev_v2(struct btrfs_fs_info *fs_info, void __user *a
 		goto out;
 	}
 
+	flags = vol_args->flags;
 	vol_args->name[BTRFS_PATH_NAME_MAX] = '\0';
 	ret = btrfs_init_new_device(fs_info, vol_args->name, vol_args->flags);
 
 	if (!ret) {
-		if (vol_args->flags & BTRFS_DEVICE_AS_CACHE)
-			btrfs_info(fs_info, "disk added %s as write cache", vol_args->name);
-		else
-			btrfs_info(fs_info, "disk added %s", vol_args->name);
-	}
+		if (vol_args->flags & BTRFS_DEVICE_AS_CACHE) {
+			int err;
+			struct btrfs_trans_handle *trans;
 
+			/* create a new chunk */
+			ASSERT(fs_info->tree_root);
+			trans = btrfs_join_transaction(fs_info->tree_root);
+			if (IS_ERR(trans)) {
+				ret = PTR_ERR(trans);
+				goto out_free;
+			}
+
+			err = btrfs_force_chunk_alloc(trans, fs_info, BTRFS_BLOCK_GROUP_DATACACHE);
+			if (err < 0) {
+				ret = err;
+				btrfs_end_transaction(trans);
+				goto out_free;
+			}
+
+			err = btrfs_commit_transaction(trans);
+			if (err) {
+				ret = err;
+			} else {
+				btrfs_info(fs_info, "allocate a chunk on cache device");
+				btrfs_info(fs_info, "disk added %s as write cache", vol_args->name);
+			}
+		} else {
+			btrfs_info(fs_info, "disk added %s", vol_args->name);
+		}
+	}
+out_free:
 	kfree(vol_args);
 out:
 	mutex_unlock(&fs_info->volume_mutex);
