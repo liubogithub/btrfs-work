@@ -1078,6 +1078,19 @@ static int should_defrag_range(struct inode *inode, u64 start, u32 thresh,
 	if (!compress && (*last_len == 0 || *last_len >= thresh) &&
 	    (em->len >= thresh || (!next_mergeable && !prev_mergeable)))
 		ret = 0;
+
+	/* force to defrag if this is located at cached device */
+	if (1) {
+		int tmp_ret;
+
+		tmp_ret = test_range_bit(&BTRFS_I(inode)->io_tree, start, extent_map_end(em) - start, EXTENT_CACHE, 0, NULL);
+		ASSERT(tmp_ret == 0 || tmp_ret == 1);
+		if (tmp_ret == 1) {
+			trace_printk("defrag process: start 0x%llx end 0x%llx\n",
+				     start, extent_map_end(em));
+			ret = 1;
+		}
+	}
 out:
 	/*
 	 * last_len ends up being a counter of how many bytes we've defragged.

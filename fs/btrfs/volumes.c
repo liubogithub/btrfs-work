@@ -4690,7 +4690,7 @@ static int __btrfs_alloc_chunk(struct btrfs_trans_handle *trans,
 		if (type & BTRFS_BLOCK_GROUP_CACHE) {
 			if (!device->for_cache)
 				continue;
-			trace_printk("find cache device %d raid_index %d\n", device->devid, index);
+			trace_printk("find cache device %llu raid_index %llu\n", device->devid, index);
 			ASSERT(ndevs == 0);
 			ASSERT(index == BTRFS_RAID_SINGLE);
 		}

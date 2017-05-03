@@ -145,7 +145,7 @@ static inline int __need_auto_defrag(struct btrfs_fs_info *fs_info)
  * enabled
  */
 int btrfs_add_inode_defrag(struct btrfs_trans_handle *trans,
-			   struct btrfs_inode *inode)
+			   struct btrfs_inode *inode, u64 start, u64 end)
 {
 	struct btrfs_fs_info *fs_info = btrfs_sb(inode->vfs_inode.i_sb);
 	struct btrfs_root *root = inode->root;
@@ -156,8 +156,11 @@ int btrfs_add_inode_defrag(struct btrfs_trans_handle *trans,
 	if (!__need_auto_defrag(fs_info))
 		return 0;
 
+	/* mark range for write cache */
+	set_extent_bits(&inode->io_tree, start, end, EXTENT_CACHE);
+
 	if (test_bit(BTRFS_INODE_IN_DEFRAG, &inode->runtime_flags))
-		return 0;
+		return 1;
 
 	if (trans)
 		transid = trans->transid;
@@ -186,7 +189,7 @@ int btrfs_add_inode_defrag(struct btrfs_trans_handle *trans,
 		kmem_cache_free(btrfs_inode_defrag_cachep, defrag);
 	}
 	spin_unlock(&fs_info->defrag_inodes_lock);
-	return 0;
+	return 1;
 }
 
 /*
@@ -319,6 +322,48 @@ static int __btrfs_run_defrag_inode(struct btrfs_fs_info *fs_info,
 
 	/* do a chunk of defrag */
 	clear_bit(BTRFS_INODE_IN_DEFRAG, &BTRFS_I(inode)->runtime_flags);
+
+	/* find if we have cached extents */
+	if (1) {
+		int found;
+		u64 start = 0;
+		u64 end = i_size_read(inode) - 1;
+
+		found = find_first_extent_bit(&BTRFS_I(inode)->io_tree, start, &start, &end, EXTENT_CACHE, NULL);
+		ASSERT(!found);
+
+		trace_printk("start 0x%llx end 0x%llx\n", start, end);
+		memset(&range, 0, sizeof(range));
+		range.len = ALIGN(end + 1 - start, fs_info->sectorsize);
+		range.start = start;
+
+		sb_start_write(fs_info->sb);
+		num_defrag = btrfs_defrag_file(inode, NULL, &range, 0, BTRFS_DEFRAG_BATCH);
+		sb_end_write(fs_info->sb);
+
+		/* LB: is it better to put this clear bits into defrag? */
+		clear_extent_bits(&BTRFS_I(inode)->io_tree, start, end, EXTENT_CACHE);
+
+		/* bail out on error */
+		if (num_defrag < 0) {
+			kmem_cache_free(btrfs_inode_defrag_cachep, defrag);
+			btrfs_err(fs_info, "%s fails on %d (0x%llx 0x%llx)", __func__, num_defrag, start, end);
+			goto out;
+		}
+
+		/* check if there are more work to do */
+		start = 0;
+		end = i_size_read(inode) - 1;
+		found = test_range_bit(&BTRFS_I(inode)->io_tree, start, end, EXTENT_CACHE, 0, NULL);
+		if (found)
+			trace_printk("requeue defrag: 0x%llx 0x%llx\n", start, end);
+		if (found)
+			btrfs_requeue_inode_defrag(BTRFS_I(inode), defrag);
+		else
+			kmem_cache_free(btrfs_inode_defrag_cachep, defrag);
+		goto out;
+	}
+
 	memset(&range, 0, sizeof(range));
 	range.len = (u64)-1;
 	range.start = defrag->last_offset;
@@ -347,7 +392,7 @@ static int __btrfs_run_defrag_inode(struct btrfs_fs_info *fs_info,
 	} else {
 		kmem_cache_free(btrfs_inode_defrag_cachep, defrag);
 	}
-
+out:
 	iput(inode);
 	return 0;
 cleanup:
