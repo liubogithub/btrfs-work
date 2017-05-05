@@ -7536,6 +7536,7 @@ static noinline int find_free_extent(struct btrfs_fs_info *fs_info,
 	}
 search:
 	have_caching_bg = false;
+	trace_printk("search_start 0x%llx hint 0x%llx index %d flags %d\n", search_start, hint_byte, index, flags);
 	if (index == 0 || index == __get_raid_index(flags))
 		full_search = true;
 	down_read(&space_info->groups_sem);
@@ -7547,6 +7548,7 @@ search:
 		btrfs_grab_block_group(block_group, delalloc);
 		search_start = block_group->key.objectid;
 
+		trace_printk("bg 0x%llx flags %d\n", block_group->key.objectid, block_group->flags);
 		/*
 		 * this can happen if we end up cycling through all the
 		 * raid types, but we want to make sure we only allocate
@@ -7869,6 +7871,10 @@ loop:
 				btrfs_end_transaction(trans);
 			if (ret)
 				goto out;
+
+			/* if the new chunk is with CACHE, lets start from it */
+			if (flags & BTRFS_BLOCK_GROUP_CACHE)
+				index = __get_raid_index(flags);
 		}
 
 		if (loop == LOOP_NO_EMPTY_SIZE) {
