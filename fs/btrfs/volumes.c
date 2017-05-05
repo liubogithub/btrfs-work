@@ -6487,6 +6487,11 @@ static int read_one_chunk(struct btrfs_fs_info *fs_info, struct btrfs_key *key,
 			}
 			btrfs_warn(fs_info, "devid %llu uuid %pU is missing",
 				   devid, uuid);
+		} else if (map->type & BTRFS_BLOCK_GROUP_CACHE) {
+			map->stripes[i].dev->for_cache = 1;
+			btrfs_info(fs_info,
+				   "devid %llu uuid %pU is a cache device",
+				   devid, uuid);
 		}
 		map->stripes[i].dev->in_fs_metadata = 1;
 	}
