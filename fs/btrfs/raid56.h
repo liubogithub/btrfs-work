@@ -39,6 +39,71 @@ static inline int nr_data_stripes(struct map_lookup *map)
 #define is_parity_stripe(x) (((x) == RAID5_P_STRIPE) ||		\
 			     ((x) == RAID6_Q_STRIPE))
 
+/* r5log */
+struct btrfs_r5l_log;
+#define BTRFS_R5LOG_MAGIC 0x6433c509
+
+/* one meta block + several data + parity blocks */
+struct btrfs_r5l_io_unit {
+	struct btrfs_r5l_log *log;
+	struct btrfs_raid_bio *rbio;
+
+	/* store meta block */
+	struct page *meta_page;
+
+	/* current offset in meta page */
+	int meta_offset;
+
+	/* current bio for accepting new data/parity block */
+	struct bio *current_bio;
+
+	/* sequence number in meta block */
+	u64 seq;
+
+	/* where io_unit starts and ends */
+	u64 log_start;
+	u64 log_end;
+
+	/* split bio to hold more data */
+	bool need_split_bio;
+	struct bio *split_bio;
+};
+
+enum r5l_payload_type {
+	R5LOG_PAYLOAD_DATA = 0,
+	R5LOG_PAYLOAD_PARITY = 1,
+};
+
+/*
+ * payload is appending to the meta block and it describes the
+ * location and the size of data or parity.
+ */
+struct btrfs_r5l_payload {
+	__le16 type;
+	__le16 flags;
+
+	__le32 size;
+
+	/* data or parity */
+	__le64 location;
+	__le64 devid;
+};
+
+/* io unit starts from a meta block. */
+struct btrfs_r5l_meta_block {
+	__le32 magic;
+
+	/* the whole size of the block */
+	__le32 meta_size;
+
+	__le64 seq;
+	__le64 position;
+
+	struct btrfs_r5l_payload payload[];
+};
+
+/* r5log end */
+
 struct btrfs_raid_bio;
 struct btrfs_device;
 
