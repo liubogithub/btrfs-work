@@ -244,8 +244,10 @@ struct btrfs_super_block {
 	__le64 cache_generation;
 	__le64 uuid_tree_generation;
 
+	/* r5log journal tail (where recovery starts) */
+	__le64 journal_tail;
 	/* future expansion */
-	__le64 reserved[30];
+	__le64 reserved[29];
 	u8 sys_chunk_array[BTRFS_SYSTEM_CHUNK_ARRAY_SIZE];
 	struct btrfs_root_backup super_roots[BTRFS_NUM_BACKUP_ROOTS];
 } __attribute__ ((__packed__));
@@ -2291,6 +2293,8 @@ BTRFS_SETGET_STACK_FUNCS(super_log_root_transid, struct btrfs_super_block,
 			 log_root_transid, 64);
 BTRFS_SETGET_STACK_FUNCS(super_log_root_level, struct btrfs_super_block,
 			 log_root_level, 8);
+BTRFS_SETGET_STACK_FUNCS(super_journal_tail, struct btrfs_super_block,
+			 journal_tail, 64);
 BTRFS_SETGET_STACK_FUNCS(super_total_bytes, struct btrfs_super_block,
 			 total_bytes, 64);
 BTRFS_SETGET_STACK_FUNCS(super_bytes_used, struct btrfs_super_block,
@@ -3283,6 +3287,10 @@ ssize_t btrfs_listxattr(struct dentry *dentry, char *buffer, size_t size);
 int btrfs_parse_options(struct btrfs_fs_info *info, char *options,
 			unsigned long new_flags);
 int btrfs_sync_fs(struct super_block *sb, int wait);
+
+/* raid56.c */
+void btrfs_r5l_write_journal_tail(struct btrfs_fs_info *fs_info);
+
 
 static inline __printf(2, 3)
 void btrfs_no_printk(const struct btrfs_fs_info *fs_info, const char *fmt, ...)

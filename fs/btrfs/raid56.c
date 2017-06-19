@@ -191,6 +191,8 @@ struct btrfs_r5l_log {
 	u64 data_offset;
 	u64 device_size;
 
+	u64 next_checkpoint;
+
 	u64 last_checkpoint;
 	u64 last_cp_seq;
 	u64 seq;
@@ -1231,10 +1233,13 @@ static void btrfs_r5l_log_endio(struct bio *bio)
 	bio_put(bio);
 
 #ifdef BTRFS_DEBUG_R5LOG
-	trace_printk("move data to disk\n");
+	trace_printk("move data to disk(current log->next_checkpoint %llu (will be %llu after writing to RAID\n", log->next_checkpoint, io->log_start);
 #endif
 	/* move data to RAID. */
 	btrfs_write_rbio(io->rbio);
+
+	/* After stripe data has been flushed into raid, set ->next_checkpoint. */
+	log->next_checkpoint = io->log_start;
 
 	if (log->current_io == io)
 		log->current_io = NULL;
@@ -1473,6 +1478,42 @@ static bool btrfs_r5l_has_free_space(struct btrfs_r5l_log *log, u64 size)
 }
 
 /*
+ * writing super with log->next_checkpoint
+ *
+ * This is protected by log->io_mutex.
+ */
+static void btrfs_r5l_write_super(struct btrfs_fs_info *fs_info, u64 cp)
+{
+	int ret;
+
+#ifdef BTRFS_DEBUG_R5LOG
+	trace_printk("r5l writing super to reclaim space, cp %llu\n", cp);
+#endif
+
+	btrfs_set_super_journal_tail(fs_info->super_for_commit, cp);
+
+	/*
+	 * flush all disk cache so that all data prior to
+	 * %next_checkpoint lands on raid disks(recovery will start
+	 * from %next_checkpoint).
+	 */
+	ret = write_all_supers(fs_info, 1);
+	ASSERT(ret == 0);
+}
+
+/* this is called by commit transaction and it's followed by writing super. */
+void btrfs_r5l_write_journal_tail(struct btrfs_fs_info *fs_info)
+{
+	if (fs_info->r5log) {
+		u64 cp = READ_ONCE(fs_info->r5log->next_checkpoint);
+
+		trace_printk("journal_tail %llu\n", cp);
+		btrfs_set_super_journal_tail(fs_info->super_copy, cp);
+		WRITE_ONCE(fs_info->r5log->last_checkpoint, cp);
+	}
+}
+
+/*
  * return 0 if data/parity are written into log and it will move data
  * to RAID in endio.
  *
@@ -1535,7 +1576,25 @@ static int btrfs_r5l_write_stripe(struct btrfs_raid_bio *rbio)
 		btrfs_r5l_log_stripe(log, data_pages, parity_pages, rbio);
 		do_submit = true;
 	} else {
-		; /* XXX: reclaim */
+#ifdef BTRFS_DEBUG_R5LOG
+		trace_printk("r5log: no space log->last_checkpoint %llu log->log_start %llu log->next_checkpoint %llu\n", log->last_checkpoint, log->log_start, log->next_checkpoint);
+#endif
+
+		/*
+		 * reclaim works via writing to log device with the
+		 * new next_checkpoint.
+		 */
+		btrfs_r5l_write_super(rbio->fs_info, log->next_checkpoint);
+
+		log->last_checkpoint = log->next_checkpoint;
+
+#ifdef BTRFS_DEBUG_R5LOG
+		trace_printk("r5log: after reclaim(write super) log->last_checkpoint %llu log->log_start %llu log->next_checkpoint %llu\n", log->last_checkpoint, log->log_start, log->next_checkpoint);
+#endif
+		/* now we should have enough space. */
+		ASSERT(btrfs_r5l_has_free_space(log, reserve));
+		btrfs_r5l_log_stripe(log, data_pages, parity_pages, rbio);
+		do_submit = true;
 	}
 
 	if (do_submit) {
