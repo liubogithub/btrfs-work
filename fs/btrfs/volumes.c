@@ -4730,7 +4730,8 @@ static int __btrfs_alloc_chunk(struct btrfs_trans_handle *trans,
 		}
 
 		if (!device->in_fs_metadata ||
-		    device->is_tgtdev_for_dev_replace)
+		    device->is_tgtdev_for_dev_replace ||
+		    (device->type & BTRFS_DEV_RAID56_LOG))
 			continue;
 
 		if (device->total_bytes > device->bytes_used)
