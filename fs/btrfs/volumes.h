@@ -26,6 +26,10 @@
 
 extern struct mutex uuid_mutex;
 
+#ifdef CONFIG_BTRFS_DEBUG
+#define BTRFS_DEBUG_R5LOG
+#endif
+
 #define BTRFS_STRIPE_LEN	SZ_64K
 
 struct buffer_head;

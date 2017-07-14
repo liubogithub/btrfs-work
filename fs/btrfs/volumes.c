@@ -4731,8 +4731,13 @@ static int __btrfs_alloc_chunk(struct btrfs_trans_handle *trans,
 
 		if (!device->in_fs_metadata ||
 		    device->is_tgtdev_for_dev_replace ||
-		    (device->type & BTRFS_DEV_RAID56_LOG))
+		    (device->type & BTRFS_DEV_RAID56_LOG)) {
+#ifdef BTRFS_DEBUG_R5LOG
+			if (device->type & BTRFS_DEV_RAID56_LOG)
+				btrfs_info(info, "skip a r5log when alloc chunk\n");
+#endif
 			continue;
+		}
 
 		if (device->total_bytes > device->bytes_used)
 			total_avail = device->total_bytes - device->bytes_used;

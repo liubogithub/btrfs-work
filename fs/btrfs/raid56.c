@@ -2753,7 +2753,9 @@ int btrfs_set_r5log(struct btrfs_fs_info *fs_info, struct btrfs_device *device)
 	cmpxchg(&fs_info->r5log, NULL, log);
 	ASSERT(fs_info->r5log == log);
 
+#ifdef BTRFS_DEBUG_R5LOG
 	trace_printk("r5log: set a r5log in fs_info,  alloc_range 0x%llx 0x%llx",
 		     log->data_offset, log->data_offset + log->device_size);
+#endif
 	return 0;
 }
