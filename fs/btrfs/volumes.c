@@ -6696,6 +6696,18 @@ static int read_one_dev(struct btrfs_fs_info *fs_info,
 	}
 
 	fill_device_from_item(leaf, dev_item, device);
+
+	if (device->type & BTRFS_DEV_RAID56_LOG) {
+		ret = btrfs_set_r5log(fs_info, device);
+		if (ret) {
+			btrfs_err(fs_info, "error %d on loading r5log", ret);
+			return ret;
+		}
+
+		btrfs_info(fs_info, "devid %llu uuid %pU is raid56 log",
+			   device->devid, device->uuid);
+	}
+
 	device->in_fs_metadata = 1;
 	if (device->writeable && !device->is_tgtdev_for_dev_replace) {
 		device->fs_devices->total_rw_bytes += device->total_bytes;
