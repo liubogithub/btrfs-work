@@ -347,6 +347,10 @@ struct btrfs_key {
 	__u64 offset;
 } __attribute__ ((__packed__));
 
+/* dev_item.type */
+/* #define BTRFS_DEV_REGULAR	0 */
+#define BTRFS_DEV_RAID56_LOG	(1ULL << 0)
+
 struct btrfs_dev_item {
 	/* the internal btrfs device id */
 	__le64 devid;

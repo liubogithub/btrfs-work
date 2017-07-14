@@ -697,6 +697,7 @@ struct btrfs_stripe_hash_table {
 void btrfs_init_async_reclaim_work(struct work_struct *work);
 
 /* fs_info */
+struct btrfs_r5l_log;
 struct reloc_control;
 struct btrfs_device;
 struct btrfs_fs_devices;
@@ -1114,6 +1115,9 @@ struct btrfs_fs_info {
 	u32 nodesize;
 	u32 sectorsize;
 	u32 stripesize;
+
+	/* raid56 log */
+	struct btrfs_r5l_log *r5log;
 };
 
 static inline struct btrfs_fs_info *btrfs_sb(struct super_block *sb)
@@ -2932,6 +2936,8 @@ static inline int btrfs_need_cleaner_sleep(struct btrfs_fs_info *fs_info)
 
 static inline void free_fs_info(struct btrfs_fs_info *fs_info)
 {
+	if (fs_info->r5log)
+		kfree(fs_info->r5log);
 	kfree(fs_info->balance_ctl);
 	kfree(fs_info->delayed_root);
 	kfree(fs_info->extent_root);

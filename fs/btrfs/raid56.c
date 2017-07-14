@@ -177,6 +177,25 @@ struct btrfs_raid_bio {
 	unsigned long *dbitmap;
 };
 
+/* raid56 log */
+struct btrfs_r5l_log {
+	/* protect this struct and log io */
+	struct mutex io_mutex;
+
+	/* r5log device */
+	struct btrfs_device *dev;
+
+	/* allocation range for log entries */
+	u64 data_offset;
+	u64 device_size;
+
+	u64 last_checkpoint;
+	u64 last_cp_seq;
+	u64 seq;
+	u64 log_start;
+	struct btrfs_r5l_io_unit *current_io;
+};
+
 static int __raid56_parity_recover(struct btrfs_raid_bio *rbio);
 static noinline void finish_rmw(struct btrfs_raid_bio *rbio);
 static void rmw_work(struct btrfs_work *work);
@@ -2714,4 +2733,27 @@ void raid56_submit_missing_rbio(struct btrfs_raid_bio *rbio)
 {
 	if (!lock_stripe_add(rbio))
 		async_missing_raid56(rbio);
+}
+
+int btrfs_set_r5log(struct btrfs_fs_info *fs_info, struct btrfs_device *device)
+{
+	struct btrfs_r5l_log *log;
+
+	log = kzalloc(sizeof(*log), GFP_NOFS);
+	if (!log)
+		return -ENOMEM;
+
+	/* see find_free_dev_extent for 1M start offset */
+	log->data_offset = 1024ull * 1024;
+	log->device_size = btrfs_device_get_total_bytes(device) - log->data_offset;
+	log->device_size = round_down(log->device_size, PAGE_SIZE);
+	log->dev = device;
+	mutex_init(&log->io_mutex);
+
+	cmpxchg(&fs_info->r5log, NULL, log);
+	ASSERT(fs_info->r5log == log);
+
+	trace_printk("r5log: set a r5log in fs_info,  alloc_range 0x%llx 0x%llx",
+		     log->data_offset, log->data_offset + log->device_size);
+	return 0;
 }

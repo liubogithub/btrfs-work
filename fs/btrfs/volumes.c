@@ -2313,7 +2313,7 @@ error:
 	return ret;
 }
 
-int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path)
+int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path, const u64 flags)
 {
 	struct btrfs_root *root = fs_info->dev_root;
 	struct request_queue *q;
@@ -2326,6 +2326,10 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 	u64 tmp;
 	int seeding_dev = 0;
 	int ret = 0;
+	bool is_r5log = (flags & BTRFS_DEVICE_RAID56_LOG);
+
+	if (is_r5log)
+		ASSERT(!fs_info->fs_devices->seeding);
 
 	if ((sb->s_flags & MS_RDONLY) && !fs_info->fs_devices->seeding)
 		return -EROFS;
@@ -2382,6 +2386,8 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 	q = bdev_get_queue(bdev);
 	if (blk_queue_discard(q))
 		device->can_discard = 1;
+	if (is_r5log)
+		device->type |= BTRFS_DEV_RAID56_LOG;
 	device->writeable = 1;
 	device->generation = trans->transid;
 	device->io_width = fs_info->sectorsize;
@@ -2434,11 +2440,13 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 	/* add sysfs device entry */
 	btrfs_sysfs_add_device_link(fs_info->fs_devices, device);
 
-	/*
-	 * we've got more storage, clear any full flags on the space
-	 * infos
-	 */
-	btrfs_clear_space_info_full(fs_info);
+	if (!is_r5log) {
+		/*
+		 * we've got more storage, clear any full flags on the space
+		 * infos
+		 */
+		btrfs_clear_space_info_full(fs_info);
+	}
 
 	mutex_unlock(&fs_info->chunk_mutex);
 	mutex_unlock(&fs_info->fs_devices->device_list_mutex);
@@ -2457,6 +2465,12 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 	if (ret) {
 		btrfs_abort_transaction(trans, ret);
 		goto error_trans;
+	}
+
+	if (is_r5log) {
+		ret = btrfs_set_r5log(fs_info, device);
+		if (ret)
+			goto error_trans;
 	}
 
 	if (seeding_dev) {

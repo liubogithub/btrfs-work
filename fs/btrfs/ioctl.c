@@ -2653,6 +2653,50 @@ out:
 	return ret;
 }
 
+/* identical to btrfs_ioctl_add_dev, but this is with flags */
+static long btrfs_ioctl_add_dev_v2(struct btrfs_fs_info *fs_info, void __user *arg)
+{
+	struct btrfs_ioctl_vol_args_v2 *vol_args;
+	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (test_and_set_bit(BTRFS_FS_EXCL_OP, &fs_info->flags))
+		return BTRFS_ERROR_DEV_EXCL_RUN_IN_PROGRESS;
+
+	mutex_lock(&fs_info->volume_mutex);
+	vol_args = memdup_user(arg, sizeof(*vol_args));
+	if (IS_ERR(vol_args)) {
+		ret = PTR_ERR(vol_args);
+		goto out;
+	}
+
+	if (vol_args->flags & BTRFS_DEVICE_RAID56_LOG &&
+	    fs_info->r5log) {
+		ret = -EEXIST;
+		btrfs_info(fs_info, "r5log: attempting to add another log device!");
+		goto out_free;
+	}
+
+	vol_args->name[BTRFS_PATH_NAME_MAX] = '\0';
+	ret = btrfs_init_new_device(fs_info, vol_args->name, vol_args->flags);
+	if (!ret) {
+		if (vol_args->flags & BTRFS_DEVICE_RAID56_LOG) {
+			ASSERT(fs_info->r5log);
+			btrfs_info(fs_info, "disk added %s as raid56 log", vol_args->name);
+		} else {
+			btrfs_info(fs_info, "disk added %s", vol_args->name);
+		}
+	}
+out_free:
+	kfree(vol_args);
+out:
+	mutex_unlock(&fs_info->volume_mutex);
+	clear_bit(BTRFS_FS_EXCL_OP, &fs_info->flags);
+	return ret;
+}
+
 static long btrfs_ioctl_add_dev(struct btrfs_fs_info *fs_info, void __user *arg)
 {
 	struct btrfs_ioctl_vol_args *vol_args;
@@ -2672,7 +2716,7 @@ static long btrfs_ioctl_add_dev(struct btrfs_fs_info *fs_info, void __user *arg)
 	}
 
 	vol_args->name[BTRFS_PATH_NAME_MAX] = '\0';
-	ret = btrfs_init_new_device(fs_info, vol_args->name);
+	ret = btrfs_init_new_device(fs_info, vol_args->name, 0);
 
 	if (!ret)
 		btrfs_info(fs_info, "disk added %s", vol_args->name);
@@ -5539,6 +5583,8 @@ long btrfs_ioctl(struct file *file, unsigned int
 		return btrfs_ioctl_resize(file, argp);
 	case BTRFS_IOC_ADD_DEV:
 		return btrfs_ioctl_add_dev(fs_info, argp);
+	case BTRFS_IOC_ADD_DEV_V2:
+		return btrfs_ioctl_add_dev_v2(fs_info, argp);
 	case BTRFS_IOC_RM_DEV:
 		return btrfs_ioctl_rm_dev(file, argp);
 	case BTRFS_IOC_RM_DEV_V2:
