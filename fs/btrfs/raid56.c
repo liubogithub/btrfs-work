@@ -1477,6 +1477,134 @@ static bool btrfs_r5l_has_free_space(struct btrfs_r5l_log *log, u64 size)
 	return log->device_size > (used_size + size);
 }
 
+static int btrfs_r5l_sync_page_io(struct btrfs_r5l_log *log,
+				  struct btrfs_device *dev, sector_t sector,
+				  int size, struct page *page, int op)
+{
+	struct bio *bio = btrfs_io_bio_alloc(GFP_NOFS, 1);
+	int ret;
+
+	bio->bi_bdev = dev->bdev;
+	bio->bi_opf = op;
+	if (dev == log->dev)
+		bio->bi_iter.bi_sector = (log->data_offset >> 9) + sector;
+	else
+		bio->bi_iter.bi_sector = sector;
+
+#ifdef BTRFS_DEBUG_R5LOG
+	trace_printk("%s: op %d bi_sector 0x%llx\n", __func__, op, (bio->bi_iter.bi_sector << 9));
+#endif
+
+	bio_add_page(bio, page, size, 0);
+	submit_bio_wait(bio);
+	ret = !bio->bi_error;
+	bio_put(bio);
+	return ret;
+}
+
+static int btrfs_r5l_write_empty_meta_block(struct btrfs_r5l_log *log, u64 pos, u64 seq)
+{
+	struct page *page;
+	struct btrfs_r5l_meta_block *mb;
+	int ret = 0;
+
+#ifdef BTRFS_DEBUG_R5LOG
+	trace_printk("%s: pos %llu seq %llu\n", __func__, pos, seq);
+#endif
+
+	page = alloc_page(GFP_NOFS | __GFP_HIGHMEM | __GFP_ZERO);
+	ASSERT(page);
+
+	mb = kmap(page);
+	mb->magic = cpu_to_le32(BTRFS_R5LOG_MAGIC);
+	mb->meta_size = cpu_to_le32(sizeof(struct btrfs_r5l_meta_block));
+	mb->seq = cpu_to_le64(seq);
+	mb->position = cpu_to_le64(pos);
+	kunmap(page);
+
+	if (!btrfs_r5l_sync_page_io(log, log->dev, (pos >> 9), PAGE_SIZE, page, REQ_OP_WRITE | REQ_FUA)) {
+		ret = -EIO;
+	}
+
+	__free_page(page);
+	return ret;
+}
+
+static void btrfs_r5l_write_super(struct btrfs_fs_info *fs_info, u64 cp);
+
+static int btrfs_r5l_recover_log(struct btrfs_r5l_log *log)
+{
+	return 0;
+}
+
+/* return 0 if success, otherwise return errors */
+int btrfs_r5l_load_log(struct btrfs_fs_info *fs_info, u64 cp)
+{
+	struct btrfs_r5l_log *log = fs_info->r5log;
+	struct page *page;
+	struct btrfs_r5l_meta_block *mb;
+	bool create_new = false;
+
+	ASSERT(log);
+
+	page = alloc_page(GFP_NOFS | __GFP_HIGHMEM);
+	ASSERT(page);
+
+	if (!btrfs_r5l_sync_page_io(log, log->dev, (cp >> 9), PAGE_SIZE, page,
+				    REQ_OP_READ)) {
+		__free_page(page);
+		return -EIO;
+	}
+
+	mb = kmap(page);
+#ifdef BTRFS_DEBUG_R5LOG
+	trace_printk("r5l: mb->pos %llu cp %llu mb->seq %llu\n", le64_to_cpu(mb->position), cp, le64_to_cpu(mb->seq));
+#endif
+
+	if (le32_to_cpu(mb->magic) != BTRFS_R5LOG_MAGIC) {
+#ifdef BTRFS_DEBUG_R5LOG
+		trace_printk("magic not match: create new r5l\n");
+#endif
+		create_new = true;
+		goto create;
+	}
+
+	ASSERT(le64_to_cpu(mb->position) == cp);
+	if (le64_to_cpu(mb->position) != cp) {
+#ifdef BTRFS_DEBUG_R5LOG
+		trace_printk("mb->position not match: create new r5l\n");
+#endif
+		create_new = true;
+		goto create;
+	}
+create:
+	if (create_new) {
+		/* initial new r5log */
+		log->last_cp_seq = prandom_u32();
+		cp = 0;
+
+		btrfs_r5l_write_empty_meta_block(log, cp, log->last_cp_seq);
+		btrfs_r5l_write_super(fs_info, cp);
+	} else {
+		log->last_cp_seq = le64_to_cpu(mb->seq);
+	}
+
+	log->last_checkpoint = cp;
+
+	kunmap(page);
+	__free_page(page);
+
+	if (create_new) {
+		log->log_start = btrfs_r5l_ring_add(log, cp, PAGE_SIZE);
+		log->seq = log->last_cp_seq + 1;
+		log->next_checkpoint = cp;
+	} else {
+		btrfs_r5l_recover_log(log);
+	}
+
+	return 0;
+}
+
 /*
  * writing super with log->next_checkpoint
  *

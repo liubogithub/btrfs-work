@@ -2987,6 +2987,22 @@ retry_root_backup:
 	fs_info->generation = generation;
 	fs_info->last_trans_committed = generation;
 
+	if (fs_info->r5log) {
+		u64 cp = btrfs_super_journal_tail(fs_info->super_copy);
+#ifdef BTRFS_DEBUG_R5LOG
+		trace_printk("%s: get journal_tail %llu\n", __func__, cp);
+#endif
+		/* if the data is not replayed, data and parity on
+		 * disk are still consistent.  So we can move on.
+		 *
+		 * About fsync, since fsync can make sure data is
+		 * flushed onto disk and only metadata is kept into
+		 * write-ahead log, the fsync'd data will never ends
+		 * up with being replayed by raid56 log.
+		 */
+		btrfs_r5l_load_log(fs_info, cp);
+	}
+
 	ret = btrfs_recover_balance(fs_info);
 	if (ret) {
 		btrfs_err(fs_info, "failed to recover balance: %d", ret);
