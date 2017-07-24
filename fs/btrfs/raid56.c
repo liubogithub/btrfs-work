@@ -1608,7 +1608,9 @@ static int btrfs_r5l_recover_load_meta(struct btrfs_r5l_recover_ctx *ctx)
 {
 	struct btrfs_r5l_meta_block *mb;
 
-	btrfs_r5l_sync_page_io(log, log->dev, (ctx->pos >> 9), PAGE_SIZE, ctx->meta_page, REQ_OP_READ);
+	ret = btrfs_r5l_recover_read_page(ctx, ctx->meta_page, ctx->pos);
+	if (ret)
+		return ret;
 
 	mb = kmap(ctx->meta_page);
 #ifdef BTRFS_DEBUG_R5LOG
