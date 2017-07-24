@@ -87,6 +87,8 @@ struct btrfs_r5l_payload {
 	/* data or parity */
 	__le64 location;
 	__le64 devid;
+
+	__le32 csum;
 };
 
 /* io unit starts from a meta block. */
@@ -95,6 +97,8 @@ struct btrfs_r5l_meta_block {
 
 	/* the whole size of the block */
 	__le32 meta_size;
+
+	__le32 csum;
 
 	__le64 seq;
 	__le64 position;
