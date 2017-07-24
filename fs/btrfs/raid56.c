@@ -1530,10 +1530,161 @@ static int btrfs_r5l_write_empty_meta_block(struct btrfs_r5l_log *log, u64 pos, 
 	return ret;
 }
 
+struct btrfs_r5l_recover_ctx {
+	u64 pos;
+	u64 seq;
+	u64 total_size;
+	struct page *meta_page;
+	struct page *io_page;
+};
+
+static int btrfs_r5l_recover_load_meta(struct btrfs_r5l_log *log, struct btrfs_r5l_recover_ctx *ctx)
+{
+	struct btrfs_r5l_meta_block *mb;
+
+	btrfs_r5l_sync_page_io(log, log->dev, (ctx->pos >> 9), PAGE_SIZE, ctx->meta_page, REQ_OP_READ);
+
+	mb = kmap(ctx->meta_page);
+#ifdef BTRFS_DEBUG_R5LOG
+	trace_printk("ctx->pos %llu ctx->seq %llu pos %llu seq %llu\n", ctx->pos, ctx->seq, le64_to_cpu(mb->position), le64_to_cpu(mb->seq));
+#endif
+
+	if (le32_to_cpu(mb->magic) != BTRFS_R5LOG_MAGIC ||
+	    le64_to_cpu(mb->position) != ctx->pos ||
+	    le64_to_cpu(mb->seq) != ctx->seq) {
+#ifdef BTRFS_DEBUG_R5LOG
+		trace_printk("%s: mismatch magic %llu default %llu\n", __func__, le32_to_cpu(mb->magic), BTRFS_R5LOG_MAGIC);
+#endif
+		return -EINVAL;
+	}
+
+	ASSERT(le32_to_cpu(mb->meta_size) <= PAGE_SIZE);
+	kunmap(ctx->meta_page);
+
+	/* meta_block */
+	ctx->total_size = PAGE_SIZE;
+
+	return 0;
+}
+
+static int btrfs_r5l_recover_load_data(struct btrfs_r5l_log *log, struct btrfs_r5l_recover_ctx *ctx)
+{
+	u64 offset;
+	struct btrfs_r5l_meta_block *mb;
+	u64 meta_size;
+	u64 io_offset;
+	struct btrfs_device *dev;
+
+	mb = kmap(ctx->meta_page);
+
+	io_offset = PAGE_SIZE;
+	offset = sizeof(struct btrfs_r5l_meta_block);
+	meta_size = le32_to_cpu(mb->meta_size);
+
+	while (offset < meta_size) {
+		struct btrfs_r5l_payload *payload = (void *)mb + offset;
+
+		/* read data from log disk and write to payload->location */
+#ifdef BTRFS_DEBUG_R5LOG
+		trace_printk("payload type %d flags %d size %d location 0x%llx devid %llu\n", le16_to_cpu(payload->type), le16_to_cpu(payload->flags), le32_to_cpu(payload->size), le64_to_cpu(payload->location), le64_to_cpu(payload->devid));
+#endif
+
+		dev = btrfs_find_device(log->fs_info, le64_to_cpu(payload->devid), NULL, NULL);
+		if (!dev || dev->missing) {
+			ASSERT(0);
+		}
+
+		if (le16_to_cpu(payload->type) == R5LOG_PAYLOAD_DATA) {
+			ASSERT(le32_to_cpu(payload->size) == 1);
+			btrfs_r5l_sync_page_io(log, log->dev, (ctx->pos + io_offset) >> 9, PAGE_SIZE, ctx->io_page, REQ_OP_READ);
+			btrfs_r5l_sync_page_io(log, dev, le64_to_cpu(payload->location) >> 9, PAGE_SIZE, ctx->io_page, REQ_OP_WRITE);
+			io_offset += PAGE_SIZE;
+		} else if (le16_to_cpu(payload->type) == R5LOG_PAYLOAD_PARITY) {
+			int i;
+			ASSERT(le32_to_cpu(payload->size) == 16);
+			for (i = 0; i < le32_to_cpu(payload->size); i++) {
+				/* liubo: parity are guaranteed to be
+				 * contiguous, use just one bio to
+				 * hold all pages and flush them. */
+				u64 parity_off = le64_to_cpu(payload->location) + i * PAGE_SIZE;
+				btrfs_r5l_sync_page_io(log, log->dev, (ctx->pos + io_offset) >> 9, PAGE_SIZE, ctx->io_page, REQ_OP_READ);
+				btrfs_r5l_sync_page_io(log, dev, parity_off >> 9, PAGE_SIZE, ctx->io_page, REQ_OP_WRITE);
+				io_offset += PAGE_SIZE;
+			}
+		} else {
+			ASSERT(0);
+		}
+
+		offset += sizeof(struct btrfs_r5l_payload);
+	}
+	kunmap(ctx->meta_page);
+
+	ctx->total_size += (io_offset - PAGE_SIZE);
+	return 0;
+}
+
+static int btrfs_r5l_recover_flush_log(struct btrfs_r5l_log *log, struct btrfs_r5l_recover_ctx *ctx)
+{
+	int ret;
+
+	while (1) {
+		ret = btrfs_r5l_recover_load_meta(log, ctx);
+		if (ret)
+			break;
+
+		ret = btrfs_r5l_recover_load_data(log, ctx);
+		ASSERT(!ret || ret > 0);
+		if (ret)
+			break;
+
+		ctx->seq++;
+		ctx->pos = btrfs_r5l_ring_add(log, ctx->pos, ctx->total_size);
+	}
+
+	return ret;
+}
+
 static void btrfs_r5l_write_super(struct btrfs_fs_info *fs_info, u64 cp);
 
 static int btrfs_r5l_recover_log(struct btrfs_r5l_log *log)
 {
+	struct btrfs_r5l_recover_ctx *ctx;
+	u64 pos;
+	int ret;
+
+	ctx = kzalloc(sizeof(*ctx), GFP_NOFS);
+	ASSERT(ctx);
+
+	ctx->pos = log->last_checkpoint;
+	ctx->seq = log->last_cp_seq;
+	ctx->meta_page = alloc_page(GFP_NOFS | __GFP_HIGHMEM);
+	ASSERT(ctx->meta_page);
+	ctx->io_page = alloc_page(GFP_NOFS | __GFP_HIGHMEM);
+	ASSERT(ctx->io_page);
+
+	ret = btrfs_r5l_recover_flush_log(log, ctx);
+	if (ret) {
+		;
+	}
+
+	pos = ctx->pos;
+	log->next_checkpoint = ctx->pos;
+	ctx->seq += 10000;
+	btrfs_r5l_write_empty_meta_block(log, ctx->pos, ctx->seq++);
+	ctx->pos = btrfs_r5l_ring_add(log, ctx->pos, PAGE_SIZE);
+
+	log->log_start = ctx->pos;
+	log->seq = ctx->seq;
+	/* last_checkpoint point to the empty block. */
+	log->last_checkpoint = pos;
+	btrfs_r5l_write_super(log->fs_info, pos);
+
+#ifdef BTRFS_DEBUG_R5LOG
+	trace_printk("%s: log_start %llu seq %llu\n", __func__, log->log_start, log->seq);
+#endif
+	__free_page(ctx->meta_page);
+	__free_page(ctx->io_page);
+	kfree(ctx);
 	return 0;
 }
 
