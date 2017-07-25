@@ -2327,6 +2327,7 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 	int seeding_dev = 0;
 	int ret = 0;
 	bool is_r5log = (flags & BTRFS_DEVICE_RAID56_LOG);
+	struct btrfs_r5l_log *r5log = NULL;
 
 	if (is_r5log)
 		ASSERT(!fs_info->fs_devices->seeding);
@@ -2365,6 +2366,15 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 		/* we can safely leave the fs_devices entry around */
 		ret = PTR_ERR(device);
 		goto error;
+	}
+
+	if (is_r5log) {
+		r5log = btrfs_r5l_init_log_prepare(fs_info, device, bdev);
+		if (IS_ERR(r5log)) {
+			kfree(device);
+			ret = PTR_ERR(r5log);
+			goto error;
+		}
 	}
 
 	name = rcu_string_strdup(device_path, GFP_KERNEL);
@@ -2467,12 +2477,6 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 		goto error_trans;
 	}
 
-	if (is_r5log) {
-		ret = btrfs_set_r5log(fs_info, device);
-		if (ret)
-			goto error_trans;
-	}
-
 	if (seeding_dev) {
 		char fsid_buf[BTRFS_UUID_UNPARSED_SIZE];
 
@@ -2514,6 +2518,10 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 			return PTR_ERR(trans);
 		}
 		ret = btrfs_commit_transaction(trans);
+	}
+
+	if (is_r5log) {
+		btrfs_r5l_init_log_post(fs_info, r5log);
 	}
 
 	/* Update ctime/mtime for libblkid */
@@ -6701,6 +6709,14 @@ static int read_one_dev(struct btrfs_fs_info *fs_info,
 	}
 
 	fill_device_from_item(leaf, dev_item, device);
+	device->in_fs_metadata = 1;
+	if (device->writeable && !device->is_tgtdev_for_dev_replace) {
+		device->fs_devices->total_rw_bytes += device->total_bytes;
+		spin_lock(&fs_info->free_chunk_lock);
+		fs_info->free_chunk_space += device->total_bytes -
+			device->bytes_used;
+		spin_unlock(&fs_info->free_chunk_lock);
+	}
 
 	if (device->type & BTRFS_DEV_RAID56_LOG) {
 		ret = btrfs_set_r5log(fs_info, device);
@@ -6713,14 +6729,6 @@ static int read_one_dev(struct btrfs_fs_info *fs_info,
 			   device->devid, device->uuid);
 	}
 
-	device->in_fs_metadata = 1;
-	if (device->writeable && !device->is_tgtdev_for_dev_replace) {
-		device->fs_devices->total_rw_bytes += device->total_bytes;
-		spin_lock(&fs_info->free_chunk_lock);
-		fs_info->free_chunk_space += device->total_bytes -
-			device->bytes_used;
-		spin_unlock(&fs_info->free_chunk_lock);
-	}
 	ret = 0;
 	return ret;
 }

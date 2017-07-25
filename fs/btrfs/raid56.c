@@ -3711,30 +3711,64 @@ void raid56_submit_missing_rbio(struct btrfs_raid_bio *rbio)
 		async_missing_raid56(rbio);
 }
 
-int btrfs_set_r5log(struct btrfs_fs_info *fs_info, struct btrfs_device *device)
+struct btrfs_r5l_log * btrfs_r5l_init_log_prepare(struct btrfs_fs_info *fs_info, struct btrfs_device *device, struct block_device *bdev)
 {
-	struct btrfs_r5l_log *log;
-
-	log = kzalloc(sizeof(*log), GFP_NOFS);
+	int num_devices = fs_info->fs_devices->num_devices;
+	u64 dev_total_bytes;
+	struct btrfs_r5l_log *log = kzalloc(sizeof(struct btrfs_r5l_log), GFP_NOFS);
 	if (!log)
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
+
+	ASSERT(device);
+	ASSERT(bdev);
+	dev_total_bytes = i_size_read(bdev->bd_inode);
 
 	/* see find_free_dev_extent for 1M start offset */
 	log->data_offset = 1024ull * 1024;
-	log->device_size = btrfs_device_get_total_bytes(device) - log->data_offset;
+	log->device_size = dev_total_bytes - log->data_offset;
 	log->device_size = round_down(log->device_size, PAGE_SIZE);
+
+	/*
+	 * when device has been included in fs_devices, do not take
+	 * into account this device when checking log size.
+	 */
+	if (device->in_fs_metadata)
+		num_devices--;
+
+	if (log->device_size < BTRFS_STRIPE_LEN * num_devices * 2) {
+		btrfs_info(fs_info, "r5log log device size (%llu < %llu) is too small", log->device_size, BTRFS_STRIPE_LEN * num_devices * 2);
+		kfree(log);
+		return ERR_PTR(-EINVAL);
+	}
+
 	log->dev = device;
 	log->fs_info = fs_info;
 	ASSERT(sizeof(device->uuid) == BTRFS_UUID_SIZE);
 	log->uuid_csum = btrfs_crc32c(~0, device->uuid, sizeof(device->uuid));
 	mutex_init(&log->io_mutex);
 
+	return log;
+}
+
+void btrfs_r5l_init_log_post(struct btrfs_fs_info *fs_info, struct btrfs_r5l_log *log)
+{
 	cmpxchg(&fs_info->r5log, NULL, log);
 	ASSERT(fs_info->r5log == log);
 
 #ifdef BTRFS_DEBUG_R5LOG
-	trace_printk("r5log: set a r5log in fs_info,  alloc_range 0x%llx 0x%llx",
+	trace_printk("r5log: set a r5log in fs_info,  alloc_range 0x%llx 0x%llx\n",
 		     log->data_offset, log->data_offset + log->device_size);
 #endif
+}
+
+int btrfs_set_r5log(struct btrfs_fs_info *fs_info, struct btrfs_device *device)
+{
+	struct btrfs_r5l_log *log;
+
+	log = btrfs_r5l_init_log_prepare(fs_info, device, device->bdev);
+	if (IS_ERR(log))
+		return PTR_ERR(log);
+
+	btrfs_r5l_init_log_post(fs_info, log);
 	return 0;
 }

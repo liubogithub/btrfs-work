@@ -134,6 +134,11 @@ void raid56_submit_missing_rbio(struct btrfs_raid_bio *rbio);
 
 int btrfs_alloc_stripe_hash_table(struct btrfs_fs_info *info);
 void btrfs_free_stripe_hash_table(struct btrfs_fs_info *info);
+struct btrfs_r5l_log * btrfs_r5l_init_log_prepare(struct btrfs_fs_info *fs_info,
+						  struct btrfs_device *device,
+						  struct block_device *bdev);
+void btrfs_r5l_init_log_post(struct btrfs_fs_info *fs_info,
+			     struct btrfs_r5l_log *log);
 int btrfs_set_r5log(struct btrfs_fs_info *fs_info, struct btrfs_device *device);
 int btrfs_r5l_load_log(struct btrfs_fs_info *fs_info, u64 cp);
 #endif
