@@ -1943,13 +1943,27 @@ static int btrfs_r5l_recover_log(struct btrfs_r5l_log *log)
 }
 
 /* return 0 if success, otherwise return errors */
-int btrfs_r5l_load_log(struct btrfs_fs_info *fs_info, u64 cp)
+int btrfs_r5l_load_log(struct btrfs_fs_info *fs_info, struct btrfs_r5l_log *r5log, u64 cp)
 {
-	struct btrfs_r5l_log *log = fs_info->r5log;
+	struct btrfs_r5l_log *log;
 	struct page *page;
 	struct btrfs_r5l_meta_block *mb;
 	bool create_new = false;
 	int ret;
+
+	if (r5log)
+		ASSERT(fs_info->r5log == NULL);
+	if (fs_info->r5log)
+		ASSERT(r5log == NULL);
+
+	if (fs_info->r5log)
+		log = fs_info->r5log;
+	else
+		/*
+		 * this only happens when adding the raid56 log for
+		 * the first time.
+		 */
+		log = r5log;
 
 	ASSERT(log);
 

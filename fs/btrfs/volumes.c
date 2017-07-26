@@ -2521,6 +2521,8 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 	}
 
 	if (is_r5log) {
+		/* initialize r5log with cp == 0. */
+		btrfs_r5l_load_log(fs_info, r5log, 0);
 		btrfs_r5l_init_log_post(fs_info, r5log);
 	}
 

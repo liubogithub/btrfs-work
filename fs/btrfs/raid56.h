@@ -140,5 +140,6 @@ struct btrfs_r5l_log * btrfs_r5l_init_log_prepare(struct btrfs_fs_info *fs_info,
 void btrfs_r5l_init_log_post(struct btrfs_fs_info *fs_info,
 			     struct btrfs_r5l_log *log);
 int btrfs_set_r5log(struct btrfs_fs_info *fs_info, struct btrfs_device *device);
-int btrfs_r5l_load_log(struct btrfs_fs_info *fs_info, u64 cp);
+int btrfs_r5l_load_log(struct btrfs_fs_info *fs_info,
+		       struct btrfs_r5l_log *r5log, u64 cp);
 #endif

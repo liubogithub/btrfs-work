@@ -3000,7 +3000,7 @@ retry_root_backup:
 		 * write-ahead log, the fsync'd data will never ends
 		 * up with being replayed by raid56 log.
 		 */
-		btrfs_r5l_load_log(fs_info, cp);
+		btrfs_r5l_load_log(fs_info, NULL, cp);
 	}
 
 	ret = btrfs_recover_balance(fs_info);
