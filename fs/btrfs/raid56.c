@@ -183,6 +183,9 @@ struct btrfs_r5l_log {
 	/* protect this struct and log io */
 	struct mutex io_mutex;
 
+	spinlock_t io_list_lock;
+	struct list_head io_list;
+
 	/* r5log device */
 	struct btrfs_device *dev;
 
@@ -1205,6 +1208,7 @@ static struct btrfs_r5l_io_unit *btrfs_r5l_alloc_io_unit(struct btrfs_r5l_log *l
 static void btrfs_r5l_free_io_unit(struct btrfs_r5l_log *log, struct btrfs_r5l_io_unit *io)
 {
 	__free_page(io->meta_page);
+	ASSERT(list_empty(&io->list));
 	kfree(io);
 }
 
@@ -1225,6 +1229,27 @@ static void btrfs_r5l_reserve_log_entry(struct btrfs_r5l_log *log, struct btrfs_
 		io->need_split_bio = true;
 }
 
+/* the IO order is maintained in log->io_list. */
+static void btrfs_r5l_finish_io(struct btrfs_r5l_log *log)
+{
+	struct btrfs_r5l_io_unit *io, *next;
+
+	spin_lock(&log->io_list_lock);
+	list_for_each_entry_safe(io, next, &log->io_list, list) {
+		if (io->status != BTRFS_R5L_STRIPE_END)
+			break;
+
+#ifdef BTRFS_DEBUG_R5LOG
+	trace_printk("current log->next_checkpoint %llu (will be %llu after writing to RAID\n", log->next_checkpoint, io->log_start);
+#endif
+
+		list_del_init(&io->list);
+		log->next_checkpoint = io->log_start;
+		btrfs_r5l_free_io_unit(log, io);
+	}
+	spin_unlock(&log->io_list_lock);
+}
+
 static void btrfs_write_rbio(struct btrfs_raid_bio *rbio);
 
 static void btrfs_r5l_log_endio(struct bio *bio)
@@ -1234,18 +1259,12 @@ static void btrfs_r5l_log_endio(struct bio *bio)
 
 	bio_put(bio);
 
-#ifdef BTRFS_DEBUG_R5LOG
-	trace_printk("move data to disk(current log->next_checkpoint %llu (will be %llu after writing to RAID\n", log->next_checkpoint, io->log_start);
-#endif
 	/* move data to RAID. */
 	btrfs_write_rbio(io->rbio);
 
+	io->status = BTRFS_R5L_STRIPE_END;
 	/* After stripe data has been flushed into raid, set ->next_checkpoint. */
-	log->next_checkpoint = io->log_start;
-
-	if (log->current_io == io)
-		log->current_io = NULL;
-	btrfs_r5l_free_io_unit(log, io);
+	btrfs_r5l_finish_io(log);
 }
 
 static struct bio *btrfs_r5l_bio_alloc(struct btrfs_r5l_log *log)
@@ -1299,6 +1318,11 @@ static struct btrfs_r5l_io_unit *btrfs_r5l_new_meta(struct btrfs_r5l_log *log)
 	bio_add_page(io->current_bio, io->meta_page, PAGE_SIZE, 0);
 
 	btrfs_r5l_reserve_log_entry(log, io);
+
+	INIT_LIST_HEAD(&io->list);
+	spin_lock(&log->io_list_lock);
+	list_add_tail(&io->list, &log->io_list);
+	spin_unlock(&log->io_list_lock);
 	return io;
 }
 
@@ -3760,6 +3784,8 @@ struct btrfs_r5l_log * btrfs_r5l_init_log_prepare(struct btrfs_fs_info *fs_info,
 	ASSERT(sizeof(device->uuid) == BTRFS_UUID_SIZE);
 	log->uuid_csum = btrfs_crc32c(~0, device->uuid, sizeof(device->uuid));
 	mutex_init(&log->io_mutex);
+	spin_lock_init(&log->io_list_lock);
+	INIT_LIST_HEAD(&log->io_list);
 
 	return log;
 }

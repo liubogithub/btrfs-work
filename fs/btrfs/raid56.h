@@ -43,10 +43,15 @@ static inline int nr_data_stripes(struct map_lookup *map)
 struct btrfs_r5l_log;
 #define BTRFS_R5LOG_MAGIC 0x6433c509
 
+#define BTRFS_R5L_STRIPE_END 1
+
 /* one meta block + several data + parity blocks */
 struct btrfs_r5l_io_unit {
 	struct btrfs_r5l_log *log;
 	struct btrfs_raid_bio *rbio;
+
+	struct list_head list;
+	int status;
 
 	/* store meta block */
 	struct page *meta_page;
