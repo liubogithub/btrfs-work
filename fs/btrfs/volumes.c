@@ -5239,6 +5239,7 @@ static int find_live_mirror(struct btrfs_fs_info *fs_info,
 	int i;
 	int tolerance;
 	struct btrfs_device *srcdev;
+	struct btrfs_device *curr;
 
 	if (dev_replace_is_ongoing &&
 	    fs_info->dev_replace.cont_reading_from_srcdev_mode ==
@@ -5248,17 +5249,25 @@ static int find_live_mirror(struct btrfs_fs_info *fs_info,
 		srcdev = NULL;
 
 	/*
-	 * try to avoid the drive that is the source drive for a
-	 * dev-replace procedure, only choose it if no other non-missing
-	 * mirror is available
+	 * try to avoid the drive that is
+	 *
+	 * a) the source drive for a dev-replace procedure,
+	 * b) not in_sync
+	 *
+	 * only choose it if no other non-missing mirror is available.
 	 */
 	for (tolerance = 0; tolerance < 2; tolerance++) {
-		if (map->stripes[optimal].dev->bdev &&
-		    (tolerance || map->stripes[optimal].dev != srcdev))
+		curr = map->stripes[optimal].dev;
+		if (curr->bdev &&
+		    test_bit(In_sync, &curr->flags) &&
+		    (tolerance || curr != srcdev))
 			return optimal;
+
 		for (i = first; i < first + num; i++) {
-			if (map->stripes[i].dev->bdev &&
-			    (tolerance || map->stripes[i].dev != srcdev))
+			curr = map->stripes[i].dev;
+			if (curr->bdev &&
+			    test_bit(In_sync, &curr->flags) &&
+			    (tolerance || curr != srcdev))
 				return i;
 		}
 	}
