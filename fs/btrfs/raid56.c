@@ -1870,6 +1870,7 @@ static void __raid_recover_end_io(struct btrfs_raid_bio *rbio)
 				 * a single failure in raid6 is rebuilt
 				 * in the pstripe code below
 				 */
+				trace_printk("stripe start %llu assuming single failure\n", rbio->bbio->raid_map[0]);
 				goto pstripe;
 			}
 
@@ -2160,6 +2161,7 @@ int raid56_parity_recover(struct btrfs_fs_info *fs_info, struct bio *bio,
 		return -EIO;
 	}
 
+	trace_printk("stripe start %llu faila %d, mirror_num %d\n", bbio->raid_map[0], rbio->faila, mirror_num);
 	if (generic_io) {
 		btrfs_bio_counter_inc_noblocked(fs_info);
 		rbio->generic_bio_cnt = 1;

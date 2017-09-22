@@ -663,6 +663,7 @@ static noinline int device_list_add(const char *path,
 		fs_devices->num_devices++;
 		mutex_unlock(&fs_devices->device_list_mutex);
 
+		trace_printk("dev %s (gen %llu) is added for the first time\n", path, found_transid);
 		ret = 1;
 		device->fs_devices = fs_devices;
 	} else if (!device->name || strcmp(device->name->str, path)) {
@@ -5203,6 +5204,8 @@ int btrfs_is_parity_mirror(struct btrfs_fs_info *fs_info,
 	if (map->type & BTRFS_BLOCK_GROUP_RAID56_MASK)
 		ret = 1;
 	free_extent_map(em);
+	if (ret)
+		btrfs_info(fs_info, "raid56 testing, no repair please......");
 	return ret;
 }
 
@@ -6513,6 +6516,8 @@ static int read_one_chunk(struct btrfs_fs_info *fs_info, struct btrfs_key *key,
 							uuid, NULL);
 		if (!map->stripes[i].dev &&
 		    !btrfs_test_opt(fs_info, DEGRADED)) {
+			btrfs_warn(fs_info, "devid %llu uuid %pU is missing, but we're not under degraded mode",
+				   devid, uuid);
 			free_extent_map(em);
 			return -EIO;
 		}
@@ -6526,7 +6531,11 @@ static int read_one_chunk(struct btrfs_fs_info *fs_info, struct btrfs_key *key,
 			}
 			btrfs_warn(fs_info, "devid %llu uuid %pU is missing",
 				   devid, uuid);
+		} else if (map->stripes[i].dev->missing) {
+			btrfs_warn(fs_info, "devid %llu uuid %pU is missing",
+				   devid, uuid);
 		}
+			
 		map->stripes[i].dev->in_fs_metadata = 1;
 	}
 
@@ -6642,8 +6651,10 @@ static int read_one_dev(struct btrfs_fs_info *fs_info,
 
 	device = btrfs_find_device(fs_info, devid, dev_uuid, fs_uuid);
 	if (!device) {
-		if (!btrfs_test_opt(fs_info, DEGRADED))
+		if (!btrfs_test_opt(fs_info, DEGRADED)) {
+			btrfs_warn(fs_info, "devid %llu uuid %pU missing, but we're not under degraded mode", devid, dev_uuid);
 			return -EIO;
+		}
 
 		device = add_missing_dev(fs_devices, devid, dev_uuid);
 		if (!device)
@@ -6665,6 +6676,11 @@ static int read_one_dev(struct btrfs_fs_info *fs_info,
 			device->missing = 1;
 		}
 
+		if (device->missing) {
+			btrfs_warn(fs_info, "devid %llu uuid %pU missing",
+				   devid, dev_uuid);
+		}
+			
 		/* Move the device to its own fs_devices */
 		if (device->fs_devices != fs_devices) {
 			ASSERT(device->missing);
@@ -7093,7 +7109,7 @@ static void btrfs_dev_stat_print_on_error(struct btrfs_device *dev)
 {
 	if (!dev->dev_stats_valid)
 		return;
-	btrfs_err_rl_in_rcu(dev->fs_info,
+	btrfs_err_in_rcu(dev->fs_info,
 		"bdev %s errs: wr %u, rd %u, flush %u, corrupt %u, gen %u",
 			   rcu_str_deref(dev->name),
 			   btrfs_dev_stat_read(dev, BTRFS_DEV_STAT_WRITE_ERRS),

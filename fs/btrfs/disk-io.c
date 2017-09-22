@@ -2502,12 +2502,16 @@ static int btrfs_read_roots(struct btrfs_fs_info *fs_info)
 
 	root = btrfs_read_tree_root(tree_root, &location);
 	if (IS_ERR(root))
+		btrfs_err(fs_info, "failed to read root %llu\n", location.objectid);
+	if (IS_ERR(root))
 		return PTR_ERR(root);
 	set_bit(BTRFS_ROOT_TRACK_DIRTY, &root->state);
 	fs_info->extent_root = root;
 
 	location.objectid = BTRFS_DEV_TREE_OBJECTID;
 	root = btrfs_read_tree_root(tree_root, &location);
+	if (IS_ERR(root))
+		btrfs_err(fs_info, "failed to read root %llu\n", location.objectid);
 	if (IS_ERR(root))
 		return PTR_ERR(root);
 	set_bit(BTRFS_ROOT_TRACK_DIRTY, &root->state);
@@ -2516,6 +2520,8 @@ static int btrfs_read_roots(struct btrfs_fs_info *fs_info)
 
 	location.objectid = BTRFS_CSUM_TREE_OBJECTID;
 	root = btrfs_read_tree_root(tree_root, &location);
+	if (IS_ERR(root))
+		btrfs_err(fs_info, "failed to read root %llu\n", location.objectid);
 	if (IS_ERR(root))
 		return PTR_ERR(root);
 	set_bit(BTRFS_ROOT_TRACK_DIRTY, &root->state);
@@ -3124,6 +3130,7 @@ retry_root_backup:
 
 	fs_info->fs_root = btrfs_read_fs_root_no_name(fs_info, &location);
 	if (IS_ERR(fs_info->fs_root)) {
+		btrfs_err(fs_info, "failed to read root %llu\n", location.objectid);
 		err = PTR_ERR(fs_info->fs_root);
 		goto fail_qgroup;
 	}
@@ -3578,6 +3585,7 @@ static int barrier_all_devices(struct btrfs_fs_info *info)
 			continue;
 
 		ret = wait_dev_flush(dev);
+		btrfs_info(info, "wait dev flush devid %llu dev->dev_stats_valid %d ret %d.....", dev->devid, dev->dev_stats_valid, ret);
 		if (ret) {
 			dev->last_flush_error = ret;
 			btrfs_dev_stat_inc_and_print(dev,
