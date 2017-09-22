@@ -1076,7 +1076,8 @@ static int rbio_add_io_page(struct btrfs_raid_bio *rbio,
 	disk_start = stripe->physical + (page_index << PAGE_SHIFT);
 
 	/* if the device is missing, just fail this stripe */
-	if (!stripe->dev->bdev)
+	if (!stripe->dev->bdev ||
+	    !test_bit(In_sync, &stripe->dev->flags))
 		return fail_rbio_index(rbio, stripe_nr);
 
 	/* see if we can add this page onto our existing bio */
