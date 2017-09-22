@@ -69,6 +69,9 @@ struct btrfs_device {
 	/* the mode sent to blkdev_get */
 	fmode_t mode;
 
+	/* bit set of 'enum flag_bits' bit  */
+	unsigned long flags;
+
 	int writeable;
 	int in_fs_metadata;
 	int missing;
@@ -259,6 +262,11 @@ struct btrfs_fs_devices {
 	struct kobject fsid_kobj;
 	struct kobject *device_dir_kobj;
 	struct completion kobj_unregister;
+};
+
+enum flag_bits {
+	Faulty,		/* device is known to have a fault */
+	In_sync,	/* device is in_sync with rest of array */
 };
 
 #define BTRFS_BIO_INLINE_CSUM_SIZE	64

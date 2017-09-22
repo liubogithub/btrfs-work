@@ -3698,6 +3698,7 @@ int write_all_supers(struct btrfs_fs_info *fs_info, int max_mirrors)
 	int do_barriers;
 	int max_errors;
 	int total_errors = 0;
+	u64 generation;
 	u64 flags;
 
 	do_barriers = !btrfs_test_opt(fs_info, NOBARRIER);
@@ -3729,7 +3730,25 @@ int write_all_supers(struct btrfs_fs_info *fs_info, int max_mirrors)
 		if (!dev->in_fs_metadata || !dev->writeable)
 			continue;
 
-		btrfs_set_stack_device_generation(dev_item, 0);
+		/*
+		 * if dev is not in_sync, record the last valid
+		 * generation.
+		 *
+		 * This is used to detect !In_sync device after
+		 * reboot, now we check a device's In_sync status by
+		 * comparing its superblock->dev_item->generation with
+		 * the latest one.
+		 *
+		 * We don't compare superblock->generation because
+		 * after reboot and a successfuly superblock writing,
+		 * generation in superblock will be updated.
+		 */
+		if (!test_bit(In_sync, &dev->flags))
+			generation = dev->generation;
+		else
+			generation = 0;
+		btrfs_set_stack_device_generation(dev_item, generation);
+
 		btrfs_set_stack_device_type(dev_item, dev->type);
 		btrfs_set_stack_device_id(dev_item, dev->devid);
 		btrfs_set_stack_device_total_bytes(dev_item,

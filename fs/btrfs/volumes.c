@@ -265,6 +265,7 @@ static struct btrfs_device *__alloc_device(void)
 	btrfs_device_data_ordered_init(dev);
 	INIT_RADIX_TREE(&dev->reada_zones, GFP_NOFS & ~__GFP_DIRECT_RECLAIM);
 	INIT_RADIX_TREE(&dev->reada_extents, GFP_NOFS & ~__GFP_DIRECT_RECLAIM);
+	ASSERT(dev->flags == 0);
 
 	return dev;
 }
@@ -1011,10 +1012,31 @@ static int __btrfs_open_devices(struct btrfs_fs_devices *fs_devices,
 			   BTRFS_UUID_SIZE))
 			goto error_brelse;
 
-		device->generation = btrfs_super_generation(disk_super);
-		if (!latest_dev ||
-		    device->generation > latest_dev->generation)
+		if (btrfs_stack_device_generation(&disk_super->dev_item) == 0)
+			device->generation = btrfs_super_generation(disk_super);
+		else
+			device->generation =
+				btrfs_stack_device_generation(&disk_super->dev_item);
+
+		/* no lock is required during the initial stage. */
+		if (!latest_dev) {
+			set_bit(In_sync, &device->flags);
 			latest_dev = device;
+		} else {
+			if (device->generation > latest_dev->generation) {
+				set_bit(In_sync, &device->flags);
+				clear_bit(In_sync, &latest_dev->flags);
+				latest_dev = device;
+			} else if (device->generation == latest_dev->generation) {
+				set_bit(In_sync, &device->flags);
+			}
+			/*
+			 * if (device->generation < latest_dev->generation)
+			 *	# don't set In_sync
+			 */
+		}
+
+		trace_printk("dev %s gen %llu In_sync %d\n", device->name->str, device->generation, test_bit(In_sync, &device->flags));
 
 		if (btrfs_super_flags(disk_super) & BTRFS_SUPER_FLAG_SEEDING) {
 			device->writeable = 0;
@@ -2393,6 +2415,7 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 	q = bdev_get_queue(bdev);
 	if (blk_queue_discard(q))
 		device->can_discard = 1;
+	set_bit(In_sync, &device->flags);
 	device->writeable = 1;
 	device->generation = trans->transid;
 	device->io_width = fs_info->sectorsize;
@@ -6521,6 +6544,14 @@ static int read_one_chunk(struct btrfs_fs_info *fs_info, struct btrfs_key *key,
 			free_extent_map(em);
 			return -EIO;
 		}
+		if (map->stripes[i].dev &&
+		    !test_bit(In_sync, &map->stripes[i].dev->flags) &&
+		    !btrfs_test_opt(fs_info, DEGRADED)) {
+			btrfs_warn(fs_info, "devid %llu uuid %pU is Not in_sync, but we're not under degraded mode",
+				   devid, uuid);
+			free_extent_map(em);
+			return -EIO;
+		}
 		if (!map->stripes[i].dev) {
 			map->stripes[i].dev =
 				add_missing_dev(fs_info->fs_devices, devid,
@@ -6664,6 +6695,14 @@ static int read_one_dev(struct btrfs_fs_info *fs_info,
 	} else {
 		if (!device->bdev && !btrfs_test_opt(fs_info, DEGRADED))
 			return -EIO;
+
+		if (!test_bit(In_sync, &device->flags) &&
+		    !btrfs_test_opt(fs_info, DEGRADED)) {
+			btrfs_warn(fs_info,
+				   "devid %llu uuid %pU is Not in_sync, but we're not under degraded mode",
+				   devid, dev_uuid);
+			return -EIO;
+		}
 
 		if(!device->bdev && !device->missing) {
 			/*
