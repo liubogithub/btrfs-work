@@ -1077,8 +1077,10 @@ static int rbio_add_io_page(struct btrfs_raid_bio *rbio,
 
 	/* if the device is missing, just fail this stripe */
 	if (!stripe->dev->bdev ||
-	    !test_bit(In_sync, &stripe->dev->flags))
+	    !test_bit(In_sync, &stripe->dev->flags)) {
+		trace_printk("stripe start %llu dev (dev %s devid %d on stripe %d) is not in_sync\n", rbio->bbio->raid_map[0], stripe->dev->name->str, stripe->dev->devid, stripe_nr);
 		return fail_rbio_index(rbio, stripe_nr);
+	}
 
 	/* see if we can add this page onto our existing bio */
 	if (last) {
@@ -1456,9 +1458,10 @@ static void raid_rmw_end_io(struct bio *bio)
 {
 	struct btrfs_raid_bio *rbio = bio->bi_private;
 
-	if (bio->bi_status)
+	if (bio->bi_status) {
 		fail_bio_stripe(rbio, bio);
-	else
+		trace_printk("rbio->faila %d rbio->failb %d\n", rbio->faila, rbio->failb);
+	} else
 		set_bio_pages_uptodate(bio);
 
 	bio_put(bio);
