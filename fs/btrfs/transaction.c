@@ -1728,6 +1728,7 @@ static void update_super_roots(struct btrfs_fs_info *fs_info)
 	super->chunk_root_level = root_item->level;
 
 	root_item = &fs_info->tree_root->root_item;
+	btrfs_info(fs_info, "super root %llu gen %llu level %d.......", root_item->bytenr, root_item->generation, root_item->level);
 	super->root = root_item->bytenr;
 	super->generation = root_item->generation;
 	super->root_level = root_item->level;

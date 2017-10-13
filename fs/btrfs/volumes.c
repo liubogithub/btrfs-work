@@ -656,6 +656,7 @@ static noinline int device_list_add(const char *path,
 		fs_devices->num_devices++;
 		mutex_unlock(&fs_devices->device_list_mutex);
 
+		trace_printk("dev %s (gen %llu) is added for the first time\n", path, found_transid);
 		ret = 1;
 		device->fs_devices = fs_devices;
 	} else if (!device->name || strcmp(device->name->str, path)) {
@@ -5396,6 +5397,8 @@ static int __btrfs_map_block_for_discard(struct btrfs_fs_info *fs_info,
 	bbio->num_stripes = num_stripes;
 out:
 	free_extent_map(em);
+	if (ret)
+		btrfs_info(fs_info, "raid56 testing, no repair please......");
 	return ret;
 }
 
@@ -6446,6 +6449,8 @@ static int read_one_chunk(struct btrfs_fs_info *fs_info, struct btrfs_key *key,
 							uuid, NULL);
 		if (!map->stripes[i].dev &&
 		    !btrfs_test_opt(fs_info, DEGRADED)) {
+			btrfs_warn(fs_info, "devid %llu uuid %pU is missing, but we're not under degraded mode",
+				   devid, uuid);
 			free_extent_map(em);
 			btrfs_report_missing_device(fs_info, devid, uuid);
 			return -EIO;
@@ -6603,6 +6608,11 @@ static int read_one_dev(struct btrfs_fs_info *fs_info,
 			device->missing = 1;
 		}
 
+		if (device->missing) {
+			btrfs_warn(fs_info, "devid %llu uuid %pU missing",
+				   devid, dev_uuid);
+		}
+			
 		/* Move the device to its own fs_devices */
 		if (device->fs_devices != fs_devices) {
 			ASSERT(device->missing);
@@ -7095,7 +7105,7 @@ static void btrfs_dev_stat_print_on_error(struct btrfs_device *dev)
 {
 	if (!dev->dev_stats_valid)
 		return;
-	btrfs_err_rl_in_rcu(dev->fs_info,
+	btrfs_err_in_rcu(dev->fs_info,
 		"bdev %s errs: wr %u, rd %u, flush %u, corrupt %u, gen %u",
 			   rcu_str_deref(dev->name),
 			   btrfs_dev_stat_read(dev, BTRFS_DEV_STAT_WRITE_ERRS),
