@@ -1029,6 +1029,9 @@ static int __btrfs_open_devices(struct btrfs_fs_devices *fs_devices,
 			 */
 		}
 
+		if (!test_bit(In_sync, &device->flags))
+			pr_info("dev %s gen %llu is not In_sync\n", device->name->str, device->generation);
+
 		trace_printk("dev %s gen %llu In_sync %d\n", device->name->str, device->generation, test_bit(In_sync, &device->flags));
 
 		if (btrfs_super_flags(disk_super) & BTRFS_SUPER_FLAG_SEEDING) {
