@@ -1987,7 +1987,7 @@ int repair_io_failure(struct btrfs_fs_info *fs_info, u64 ino, u64 start,
 	ASSERT(!(fs_info->sb->s_flags & MS_RDONLY));
 	BUG_ON(!mirror_num);
 
-	if (btrfs_is_parity_mirror(fs_info, logical, length, mirror_num))
+	if (btrfs_is_parity_mirror(fs_info, logical, length))
 		return 0;
 	
 	bio = btrfs_io_bio_alloc(1);
