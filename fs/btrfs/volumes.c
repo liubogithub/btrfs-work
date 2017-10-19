@@ -1011,28 +1011,9 @@ static int __btrfs_open_devices(struct btrfs_fs_devices *fs_devices,
 			device->generation =
 				btrfs_stack_device_generation(&disk_super->dev_item);
 
-		/* no lock is required during the initial stage. */
-		if (!latest_dev) {
-			set_bit(In_sync, &device->flags);
-			latest_dev = device;
-		} else {
-			if (device->generation > latest_dev->generation) {
-				set_bit(In_sync, &device->flags);
-				clear_bit(In_sync, &latest_dev->flags);
-				latest_dev = device;
-			} else if (device->generation == latest_dev->generation) {
-				set_bit(In_sync, &device->flags);
-			}
-			/*
-			 * if (device->generation < latest_dev->generation)
-			 *	# don't set In_sync
-			 */
-		}
-
-		if (!test_bit(In_sync, &device->flags))
-			pr_info("dev %s gen %llu is not In_sync\n", device->name->str, device->generation);
-
-		trace_printk("dev %s gen %llu In_sync %d\n", device->name->str, device->generation, test_bit(In_sync, &device->flags));
+		if (!latest_dev ||
+                    device->generation > latest_dev->generation)
+                        latest_dev = device;
 
 		if (btrfs_super_flags(disk_super) & BTRFS_SUPER_FLAG_SEEDING) {
 			device->writeable = 0;
@@ -1066,6 +1047,23 @@ error_brelse:
 		blkdev_put(bdev, flags);
 		continue;
 	}
+
+	/* set In_sync flag */
+	list_for_each_entry(device, head, dev_list) {
+		ASSERT(device->generation <= latest_dev->generation);
+		if (device->generation == latest_dev->generation) {
+			set_bit(In_sync, &device->flags);
+			pr_debug("btrfs: dev %s gen %llu is In_sync\n",
+				 device->name->str, device->generation);
+		} else {
+			clear_bit(In_sync, &device->flags);
+			pr_info("btrfs: dev %s gen %llu is not In_sync\n",
+				device->name->str, device->generation);
+		}
+
+		trace_printk("dev %s gen %llu In_sync %d\n", device->name->str, device->generation, test_bit(In_sync, &device->flags));
+	}
+
 	if (fs_devices->open_devices == 0) {
 		ret = -EINVAL;
 		goto out;
