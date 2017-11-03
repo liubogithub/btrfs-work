@@ -5981,35 +5981,10 @@ static inline void btrfs_end_bbio(struct btrfs_bio *bbio, struct bio *bio)
 	btrfs_put_bbio(bbio);
 }
 
-static void btrfs_end_bio(struct bio *bio)
+static void __btrfs_end_bio(struct bio *bio)
 {
 	struct btrfs_bio *bbio = bio->bi_private;
 	int is_orig_bio = 0;
-
-	if (bio->bi_status) {
-		atomic_inc(&bbio->error);
-		if (bio->bi_status == BLK_STS_IOERR ||
-		    bio->bi_status == BLK_STS_TARGET) {
-			unsigned int stripe_index =
-				btrfs_io_bio(bio)->stripe_index;
-			struct btrfs_device *dev;
-
-			BUG_ON(stripe_index >= bbio->num_stripes);
-			dev = bbio->stripes[stripe_index].dev;
-			if (dev->bdev) {
-				if (bio_op(bio) == REQ_OP_WRITE)
-					btrfs_dev_stat_inc(dev,
-						BTRFS_DEV_STAT_WRITE_ERRS);
-				else
-					btrfs_dev_stat_inc(dev,
-						BTRFS_DEV_STAT_READ_ERRS);
-				if (bio->bi_opf & REQ_PREFLUSH)
-					btrfs_dev_stat_inc(dev,
-						BTRFS_DEV_STAT_FLUSH_ERRS);
-				btrfs_dev_stat_print_on_error(dev);
-			}
-		}
-	}
 
 	if (bio == bbio->orig_bio)
 		is_orig_bio = 1;
@@ -6040,6 +6015,39 @@ static void btrfs_end_bio(struct bio *bio)
 	} else if (!is_orig_bio) {
 		bio_put(bio);
 	}
+}
+
+static void btrfs_end_bio(struct bio *bio)
+{
+	struct btrfs_bio *bbio = bio->bi_private;
+	int is_orig_bio = 0;
+
+	if (bio->bi_status) {
+		atomic_inc(&bbio->error);
+		if (bio->bi_status == BLK_STS_IOERR ||
+		    bio->bi_status == BLK_STS_TARGET) {
+			unsigned int stripe_index =
+				btrfs_io_bio(bio)->stripe_index;
+			struct btrfs_device *dev;
+
+			BUG_ON(stripe_index >= bbio->num_stripes);
+			dev = bbio->stripes[stripe_index].dev;
+			if (dev->bdev) {
+				if (bio_op(bio) == REQ_OP_WRITE)
+					btrfs_dev_stat_inc(dev,
+						BTRFS_DEV_STAT_WRITE_ERRS);
+				else
+					btrfs_dev_stat_inc(dev,
+						BTRFS_DEV_STAT_READ_ERRS);
+				if (bio->bi_opf & REQ_PREFLUSH)
+					btrfs_dev_stat_inc(dev,
+						BTRFS_DEV_STAT_FLUSH_ERRS);
+				btrfs_dev_stat_print_on_error(dev);
+			}
+		}
+	}
+
+	__btrfs_end_bio(bio);
 }
 
 /*
