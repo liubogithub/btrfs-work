@@ -183,7 +183,7 @@ static void rmw_work(struct btrfs_work *work);
 static void read_rebuild_work(struct btrfs_work *work);
 static void async_rmw_stripe(struct btrfs_raid_bio *rbio);
 static void async_read_rebuild(struct btrfs_raid_bio *rbio);
-static int fail_bio_stripe(struct btrfs_raid_bio *rbio, struct bio *bio);
+static int fail_bio_stripe(struct bio *bio);
 static int fail_rbio_index(struct btrfs_raid_bio *rbio, int failed);
 static void __free_raid_bio(struct btrfs_raid_bio *rbio);
 static void index_rbio_pages(struct btrfs_raid_bio *rbio);
@@ -898,7 +898,7 @@ static void raid_write_end_io(struct bio *bio)
 	int max_errors;
 
 	if (err)
-		fail_bio_stripe(rbio, bio);
+		fail_bio_stripe(bio);
 
 	bio_put(bio);
 
@@ -1415,9 +1415,9 @@ out:
  * helper to fail a stripe based on a physical disk
  * bio.
  */
-static int fail_bio_stripe(struct btrfs_raid_bio *rbio,
-			   struct bio *bio)
+static int fail_bio_stripe(struct bio *bio)
 {
+	struct btrfs_raid_bio *rbio = bio->bi_private;
 	int failed = find_bio_stripe(rbio, bio);
 
 	if (failed < 0)
@@ -1455,7 +1455,7 @@ static void raid_rmw_end_io(struct bio *bio)
 	struct btrfs_raid_bio *rbio = bio->bi_private;
 
 	if (bio->bi_status)
-		fail_bio_stripe(rbio, bio);
+		fail_bio_stripe(bio);
 	else
 		set_bio_pages_uptodate(bio);
 
@@ -1998,7 +1998,7 @@ static void raid_recover_end_io(struct bio *bio)
 	 * up to date if there were no errors
 	 */
 	if (bio->bi_status)
-		fail_bio_stripe(rbio, bio);
+		fail_bio_stripe(bio);
 	else
 		set_bio_pages_uptodate(bio);
 	bio_put(bio);
@@ -2537,7 +2537,7 @@ static void raid56_parity_scrub_end_io(struct bio *bio)
 	struct btrfs_raid_bio *rbio = bio->bi_private;
 
 	if (bio->bi_status)
-		fail_bio_stripe(rbio, bio);
+		fail_bio_stripe(bio);
 	else
 		set_bio_pages_uptodate(bio);
 
