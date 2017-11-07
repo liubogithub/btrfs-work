@@ -281,6 +281,7 @@ struct btrfs_io_bio {
 	u8 csum_inline[BTRFS_BIO_INLINE_CSUM_SIZE];
 	u8 *csum_allocated;
 	btrfs_io_bio_end_io_t *end_io;
+	struct work_struct work;
 	struct bvec_iter iter;
 	/*
 	 * This member must come last, bio_alloc_bioset will allocate enough
@@ -544,5 +545,7 @@ void btrfs_reset_fs_info_ptr(struct btrfs_fs_info *fs_info);
 bool btrfs_check_rw_degradable(struct btrfs_fs_info *fs_info);
 void btrfs_report_missing_device(struct btrfs_fs_info *fs_info, u64 devid,
 				 u8 *uuid);
+int btrfs_narrow_write_error(struct bio *bio, struct btrfs_device *dev);
+void btrfs_record_bio_error(struct bio *bio, struct btrfs_device *dev);
 
 #endif
