@@ -2690,7 +2690,6 @@ struct bio *btrfs_bio_clone(struct bio *bio)
 	new = bio_clone_fast(bio, GFP_NOFS, btrfs_bioset);
 	btrfs_bio = btrfs_io_bio(new);
 	btrfs_io_bio_init(btrfs_bio);
-	btrfs_bio->iter = bio->bi_iter;
 	return new;
 }
 
@@ -2717,7 +2716,6 @@ struct bio *btrfs_bio_clone_partial(struct bio *orig, int offset, int size)
 	btrfs_io_bio_init(btrfs_bio);
 
 	bio_trim(bio, offset >> 9, size >> 9);
-	btrfs_bio->iter = bio->bi_iter;
 	return bio;
 }
 

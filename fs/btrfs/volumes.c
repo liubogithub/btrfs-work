@@ -6107,9 +6107,10 @@ static void submit_stripe_bio(struct btrfs_bio *bbio, struct bio *bio,
 	struct btrfs_fs_info *fs_info = bbio->fs_info;
 
 	bio->bi_private = bbio;
-	btrfs_io_bio(bio)->stripe_index = dev_nr;
 	bio->bi_end_io = btrfs_end_bio;
 	bio->bi_iter.bi_sector = physical >> 9;
+	btrfs_io_bio(bio)->stripe_index = dev_nr;
+	btrfs_io_bio(bio)->iter = bio->bi_iter;
 #ifdef DEBUG
 	{
 		struct rcu_string *name;
