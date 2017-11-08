@@ -887,18 +887,11 @@ static void rbio_orig_end_io(struct btrfs_raid_bio *rbio, blk_status_t err)
 	}
 }
 
-/*
- * end io function used by finish_rmw.  When we finally
- * get here, we've written a full stripe
- */
-static void raid_write_end_io(struct bio *bio)
+static void __raid_write_end_io(struct bio *bio)
 {
 	struct btrfs_raid_bio *rbio = bio->bi_private;
-	blk_status_t err = bio->bi_status;
+	blk_status_t err;
 	int max_errors;
-
-	if (err)
-		fail_bio_stripe(bio);
 
 	bio_put(bio);
 
@@ -914,6 +907,18 @@ static void raid_write_end_io(struct bio *bio)
 		err = BLK_STS_IOERR;
 
 	rbio_orig_end_io(rbio, err);
+}
+
+/*
+ * end io function used by finish_rmw.  When we finally
+ * get here, we've written a full stripe
+ */
+static void raid_write_end_io(struct bio *bio)
+{
+	if (bio->bi_status)
+		fail_bio_stripe(bio);
+
+	__raid_write_end_io(bio);
 }
 
 /*
