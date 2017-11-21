@@ -893,6 +893,7 @@ static void __raid_write_end_io(struct bio *bio)
 	blk_status_t err;
 	int max_errors;
 
+	trace_printk("stripe %d bio %llu %llu rbio->error %d\n", btrfs_io_bio(bio)->stripe_index, (u64)btrfs_io_bio(bio)->iter.bi_sector << 9, (u64)btrfs_io_bio(bio)->iter.bi_size, atomic_read(&rbio->error));
 	bio_put(bio);
 
 	if (!atomic_dec_and_test(&rbio->stripes_pending))
@@ -909,14 +910,49 @@ static void __raid_write_end_io(struct bio *bio)
 	rbio_orig_end_io(rbio, err);
 }
 
+struct btrfs_device *get_raid_device_from_bio(struct bio *bio)
+{
+	struct btrfs_raid_bio *rbio = bio->bi_private;
+	unsigned int stripe_index = btrfs_io_bio(bio)->stripe_index;
+
+	BUG_ON(stripe_index >= rbio->bbio->num_stripes);
+	return rbio->bbio->stripes[stripe_index].dev;
+}
+
+static void raid_handle_write_error(struct work_struct *work)
+{
+	struct btrfs_io_bio *io_bio;
+	struct bio *bio;
+	struct btrfs_device *dev;
+
+	io_bio = container_of(work, struct btrfs_io_bio, work);
+	bio = &io_bio->bio;
+	dev = get_raid_device_from_bio(bio);
+
+	if (!btrfs_narrow_write_error(bio, dev)) {
+		fail_bio_stripe(bio);
+		btrfs_record_bio_error(bio, dev);
+	}
+
+	__raid_write_end_io(bio);
+}
+
+static void raid_reschedule_bio(struct bio *bio)
+{
+	INIT_WORK(&btrfs_io_bio(bio)->work, raid_handle_write_error);
+	queue_work(system_unbound_wq, &btrfs_io_bio(bio)->work);
+}
+
 /*
  * end io function used by finish_rmw.  When we finally
  * get here, we've written a full stripe
  */
 static void raid_write_end_io(struct bio *bio)
 {
-	if (bio->bi_status)
-		fail_bio_stripe(bio);
+	if (bio->bi_status) {
+		raid_reschedule_bio(bio);
+		return;
+	}
 
 	__raid_write_end_io(bio);
 }
@@ -1108,6 +1144,7 @@ static int rbio_add_io_page(struct btrfs_raid_bio *rbio,
 	bio->bi_iter.bi_size = 0;
 	bio_set_dev(bio, stripe->dev->bdev);
 	bio->bi_iter.bi_sector = disk_start >> 9;
+	btrfs_io_bio(bio)->stripe_index = stripe_nr;
 
 	bio_add_page(bio, page, PAGE_SIZE, 0);
 	bio_list_add(bio_list, bio);
@@ -1324,6 +1361,8 @@ write_data:
 		bio->bi_private = rbio;
 		bio->bi_end_io = raid_write_end_io;
 		bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
+		btrfs_io_bio(bio)->iter = bio->bi_iter;
+		trace_printk("stripe %d bio %llu %llu\n", btrfs_io_bio(bio)->stripe_index, (u64)bio->bi_iter.bi_sector << 9, (u64)bio->bi_iter.bi_size);
 
 		submit_bio(bio);
 	}
@@ -2452,6 +2491,8 @@ submit_write:
 		bio->bi_private = rbio;
 		bio->bi_end_io = raid_write_end_io;
 		bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
+		btrfs_io_bio(bio)->iter = bio->bi_iter;
+		trace_printk("stripe %d bio %llu %llu\n", btrfs_io_bio(bio)->stripe_index, (u64)bio->bi_iter.bi_sector << 9, (u64)bio->bi_iter.bi_size);
 
 		submit_bio(bio);
 	}
