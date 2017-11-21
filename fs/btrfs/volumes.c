@@ -6029,76 +6029,30 @@ static inline struct btrfs_device *get_device_from_bio(struct bio *bio)
 }
 
 /*
- * return 1 if every sector retry returns successful.
- * return 0 if one or more sector retries fails.
+ * Return 1 if retry returns successful.
+ * Return 0 otherwise.
  */
 int btrfs_narrow_write_error(struct bio *bio, struct btrfs_device *dev)
 {
 	struct btrfs_io_bio *io_bio = btrfs_io_bio(bio);
-	u64 sectors_to_write;
-	u64 offset;
-	u64 orig;
-	u64 unit;
-	u64 block_sectors;
-	int ok = 1;
+	int ret = 1;
 	struct bio *wbio;
 
-	/* offset and unit are bytes aligned, not 512-bytes aligned. */
-	sectors_to_write = io_bio->iter.bi_size >> 9;
-	orig = io_bio->iter.bi_sector;
-	offset = 0;
-	block_sectors = bdev_logical_block_size(dev->bdev) >> 9;
-	unit = block_sectors;
-	ASSERT(unit == 1);
+	trace_printk("bio physical 0x%llx len 0x%llx\n", (unsigned long long)io_bio->iter.bi_sector << 9, (unsigned long long)io_bio->iter.bi_size);
 
-	trace_printk("bio physical 0x%llx len 0x%llx bs 0x%llx\n", orig << 9,  sectors_to_write << 9, block_sectors << 9);
-	while (1) {
-		if (!sectors_to_write)
-			break;
-		/*
-		 * LIUBO: I don't think unit > sectors_to_write could
-		 * happen, sectors_to_write should be aligned to PAGE_SIZE
-		 * which is > unit.  Just in case.
-		 */
-		if (unit > sectors_to_write) {
-			WARN_ONCE(1, "unit %llu > sectors_to_write (%llu)\n", unit, sectors_to_write);
-			unit = sectors_to_write;
-		}
+	/* this would never fail, check btrfs_bio_clone(). */
+	wbio = btrfs_bio_clone(bio);
+	wbio->bi_opf = REQ_OP_WRITE;
+	wbio->bi_iter = io_bio->iter;
 
-		/* write @unit bytes at @offset */
-		/* this would never fail, check btrfs_bio_clone(). */
-		wbio = btrfs_bio_clone(bio);
-		wbio->bi_opf = REQ_OP_WRITE;
-		wbio->bi_iter = io_bio->iter;
+	bio_copy_dev(wbio, bio);
 
-		bio_trim(wbio, offset, unit);
-		bio_copy_dev(wbio, bio);
+	/* submit in sync way */
+	if (submit_bio_wait(wbio) < 0)
+		ret = 0;
 
-		/* submit in sync way */
-		/*
-		 * LIUBO: There is an issue, if this bio is quite
-		 * large, say 1M or 2M, and sector size is just 512,
-		 * then this may take a while.
-		 *
-		 * May need to schedule the job to workqueue.
-		 */
-		if (submit_bio_wait(wbio) < 0) {
-			ok = 0 && ok;
-			/*
-			 * This is not correct if badblocks is enabled
-			 * as we need to record every bad sector by
-			 * trying sectors one by one.
-			 */
-			break;
-		}
-
-		bio_put(wbio);
-		trace_printk("offset %llu unit %llu sectors_to_write %llu\n", offset, unit, sectors_to_write);
-		offset += unit;
-		sectors_to_write -= unit;
-		unit = block_sectors;
-	}
-	return ok;
+	bio_put(wbio);
+	return ret;
 }
 
 void btrfs_record_bio_error(struct bio *bio, struct btrfs_device *dev)
