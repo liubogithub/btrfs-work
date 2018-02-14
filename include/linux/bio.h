@@ -514,8 +514,10 @@ extern unsigned int bvec_nr_vecs(unsigned short idx);
 
 #define bio_set_dev(bio, bdev) 			\
 do {						\
-	if ((bio)->bi_disk != (bdev)->bd_disk)	\
-		bio_clear_flag(bio, BIO_THROTTLED);\
+	if ((bio)->bi_disk != (bdev)->bd_disk)	{	\
+		bio_clear_flag(bio, BIO_THROTTLED);	\
+		bio_clear_flag(bio, BIO_THROTL_COUNTED);\
+	}					\
 	(bio)->bi_disk = (bdev)->bd_disk;	\
 	(bio)->bi_partno = (bdev)->bd_partno;	\
 } while (0)

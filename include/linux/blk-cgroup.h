@@ -703,11 +703,12 @@ static inline bool blkcg_bio_issue_check(struct request_queue *q,
 
 	throtl = blk_throtl_bio(q, blkg, bio);
 
-	if (!throtl) {
+	if (!throtl && !bio_flagged(bio, BIO_THROTL_COUNTED)) {
 		blkg = blkg ?: q->root_blkg;
 		blkg_rwstat_add(&blkg->stat_bytes, bio->bi_opf,
 				bio->bi_iter.bi_size);
 		blkg_rwstat_add(&blkg->stat_ios, bio->bi_opf, 1);
+		bio_set_flag(bio, BIO_THROTL_COUNTED);
 	}
 
 	rcu_read_unlock();
