@@ -1986,7 +1986,8 @@ cleanup:
 	kfree(pointers);
 
 cleanup_io:
-	if (rbio->operation == BTRFS_RBIO_READ_REBUILD) {
+	if (rbio->operation == BTRFS_RBIO_READ_REBUILD ||
+	    rbio->operation == BTRFS_RBIO_REBUILD_MISSING) {
 		/*
 		 * - In case of two failures, where rbio->failb != -1:
 		 *
@@ -2007,8 +2008,6 @@ cleanup_io:
 		else
 			clear_bit(RBIO_CACHE_READY_BIT, &rbio->flags);
 
-		rbio_orig_end_io(rbio, err);
-	} else if (rbio->operation == BTRFS_RBIO_REBUILD_MISSING) {
 		rbio_orig_end_io(rbio, err);
 	} else if (err == BLK_STS_OK) {
 		rbio->faila = -1;
