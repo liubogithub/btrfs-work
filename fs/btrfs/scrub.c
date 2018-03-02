@@ -1444,7 +1444,6 @@ nodatasum_case:
 							    page_num) != 0) {
 				btrfs_dev_replace_stats_inc(
 					&fs_info->dev_replace.num_write_errors);
-				success = 0;
 			}
 		} else if (sblock_other) {
 			ret = scrub_repair_page_from_good_copy(sblock_bad,
