@@ -6843,6 +6843,12 @@ struct extent_map *btrfs_get_extent(struct btrfs_inode *inode,
 	 */
 	path->reada = READA_FORWARD;
 
+	/*
+	 * Unless we're going to uncompress inline extent, no sleep would
+	 * happen.
+	 */
+	path->leave_spinning = 1;
+
 	ret = btrfs_lookup_file_extent(NULL, root, path, objectid, start, 0);
 	if (ret < 0) {
 		err = ret;
@@ -6945,6 +6951,8 @@ next:
 		em->orig_block_len = em->len;
 		em->orig_start = em->start;
 		ptr = btrfs_file_extent_inline_start(item) + extent_offset;
+
+		btrfs_set_path_blocking(path);
 		if (!PageUptodate(page)) {
 			if (btrfs_file_extent_compression(leaf, item) !=
 			    BTRFS_COMPRESS_NONE) {
