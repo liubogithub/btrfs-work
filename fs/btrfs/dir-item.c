@@ -160,8 +160,27 @@ second_insert:
 	}
 	btrfs_release_path(path);
 
-	ret2 = btrfs_insert_delayed_dir_index(trans, name, name_len, dir,
-					      &disk_key, type, index);
+	{
+		key.objectid = btrfs_ino(dir);
+		key.type = BTRFS_DIR_INDEX_KEY;
+		key.offset = index;
+		dir_item = insert_with_overflow(trans, root, path, &key, data_size, name, name_len);
+		if (IS_ERR(dir_item)) {
+			ret2 = PTR_ERR(dir_item);
+			goto out_free;
+		}
+
+		leaf = path->nodes[0];
+		btrfs_set_dir_item_key(leaf, dir_item, &disk_key);
+		btrfs_set_dir_type(leaf, dir_item, type);
+		btrfs_set_dir_data_len(leaf, dir_item, 0);
+		btrfs_set_dir_name_len(leaf, dir_item, name_len);
+		btrfs_set_dir_transid(leaf, dir_item, trans->transid);
+		name_ptr = (unsigned long)(dir_item + 1);
+
+		write_extent_buffer(leaf, name, name_ptr, name_len);
+		btrfs_mark_buffer_dirty(leaf);
+	}
 out_free:
 	btrfs_free_path(path);
 	if (ret)
