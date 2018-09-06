@@ -2883,7 +2883,7 @@ int btrfs_async_run_delayed_refs(struct btrfs_fs_info *fs_info,
 
 	btrfs_queue_work(fs_info->extent_workers, &async->work);
 
-	if (wait) {
+	if (0 && wait) {
 		wait_for_completion(&async->wait);
 		ret = async->error;
 		kfree(async);
