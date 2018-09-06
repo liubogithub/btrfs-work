@@ -5184,6 +5184,11 @@ bool set_extent_buffer_dirty(struct extent_buffer *eb)
 			set_page_dirty(eb->pages[i]);
 	}
 
+#ifdef BTRFS_DEBUG
+	for (i = 0; i < num_pages; i++)
+		ASSERT(PageDirty(eb->pages[i]));
+#endif
+	
 	return was_dirty;
 }
 
