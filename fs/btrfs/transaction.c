@@ -889,8 +889,7 @@ static int __btrfs_end_transaction(struct btrfs_trans_handle *trans,
 
 	kmem_cache_free(btrfs_trans_handle_cachep, trans);
 	if (must_run_delayed_refs) {
-		btrfs_async_run_delayed_refs(info, cur, transid,
-					     must_run_delayed_refs == 1);
+		btrfs_async_run_delayed_refs(info, cur, transid);
 	}
 	return err;
 }

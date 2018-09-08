@@ -2852,14 +2852,11 @@ end:
 	if (ret && !async->error)
 		async->error = ret;
 done:
-	if (async->sync)
-		complete(&async->wait);
-	else
-		kfree(async);
+	kfree(async);
 }
 
 int btrfs_async_run_delayed_refs(struct btrfs_fs_info *fs_info,
-				 unsigned long count, u64 transid, int wait)
+				 unsigned long count, u64 transid)
 {
 	struct async_delayed_refs *async;
 	int ret;
@@ -2872,23 +2869,12 @@ int btrfs_async_run_delayed_refs(struct btrfs_fs_info *fs_info,
 	async->count = count;
 	async->error = 0;
 	async->transid = transid;
-	if (wait)
-		async->sync = 1;
-	else
-		async->sync = 0;
-	init_completion(&async->wait);
 
 	btrfs_init_work(&async->work, btrfs_extent_refs_helper,
 			delayed_ref_async_start, NULL, NULL);
 
 	btrfs_queue_work(fs_info->extent_workers, &async->work);
 
-	if (0 && wait) {
-		wait_for_completion(&async->wait);
-		ret = async->error;
-		kfree(async);
-		return ret;
-	}
 	return 0;
 }
 
