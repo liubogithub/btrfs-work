@@ -3864,6 +3864,11 @@ noinline int btrfs_update_inode(struct btrfs_trans_handle *trans,
 	struct btrfs_fs_info *fs_info = root->fs_info;
 	int ret;
 
+	if (!btrfs_is_free_space_inode(BTRFS_I(inode)) &&
+	    root->root_key.objectid != BTRFS_DATA_RELOC_TREE_OBJECTID &&
+	    !test_bit(BTRFS_FS_LOG_RECOVERING, &fs_info->flags))
+		btrfs_update_root_times(trans, root);
+
 	return btrfs_update_inode_item(trans, root, inode);
 }
 
