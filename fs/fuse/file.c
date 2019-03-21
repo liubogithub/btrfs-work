@@ -1159,11 +1159,11 @@ static ssize_t fuse_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	struct inode *inode = file->f_mapping->host;
 	struct fuse_conn *fc = get_fuse_conn(inode);
 
-	if (ff->open_flags & FOPEN_DIRECT_IO)
-		return fuse_direct_read_iter(iocb, to);
-
 	if (IS_DAX(inode))
 		return fuse_dax_read_iter(iocb, to);
+
+	if (ff->open_flags & FOPEN_DIRECT_IO)
+		return fuse_direct_read_iter(iocb, to);
 
 	/*
 	 * In auto invalidate mode, always update attributes on read.
@@ -1427,10 +1427,11 @@ static ssize_t fuse_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	ssize_t err;
 	loff_t endbyte = 0;
 
-	if (ff->open_flags & FOPEN_DIRECT_IO)
-		return fuse_direct_write_iter(iocb, from);
 	if (IS_DAX(inode))
 		return fuse_dax_write_iter(iocb, from);
+
+	if (ff->open_flags & FOPEN_DIRECT_IO)
+		return fuse_direct_write_iter(iocb, from);
 
 	if (get_fuse_conn(inode)->writeback_cache) {
 		/* Update size (EOF optimization) and mode (SUID clearing) */
