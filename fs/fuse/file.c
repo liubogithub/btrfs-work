@@ -3580,7 +3580,7 @@ static long __fuse_file_fallocate(struct file *file, int mode,
 		err = filemap_write_and_wait_range(inode->i_mapping, offset,
 							endbyte);
 		if (err)
-			goto out;
+			return err;
 		fuse_sync_writes(inode);
 	}
 
