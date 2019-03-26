@@ -3618,7 +3618,7 @@ static long __fuse_file_fallocate(struct file *file, int mode,
 	if (mode & FALLOC_FL_PUNCH_HOLE) {
 		down_write(&fi->i_mmap_sem);
 		truncate_pagecache_range(inode, offset, offset + length - 1);
-		down_write(&fi->i_mmap_sem);
+		up_write(&fi->i_mmap_sem);
 	}
 	fuse_invalidate_attr(inode);
 
