@@ -589,7 +589,7 @@ static int virtio_fs_setup_dax(struct virtio_device *vdev, struct virtio_fs *fs)
 	pgmap->res = (struct resource){
 		.name = "virtio-fs dax window",
 		.start = (phys_addr_t) cache_reg.addr,
-		.end = (phys_addr_t) cache_reg.addr + cache_reg.len,
+		.end = (phys_addr_t) cache_reg.addr + cache_reg.len - 1,
 	};
 
 	fs->window_kaddr = devm_memremap_pages(&vdev->dev, pgmap);
