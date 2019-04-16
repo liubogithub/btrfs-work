@@ -504,9 +504,9 @@ static void virtio_fs_percpu_exit(void *data)
 	percpu_ref_exit(&mi->ref);
 }
 
-static void virtio_fs_percpu_kill(void *data)
+static void virtio_fs_percpu_kill(struct percpu_ref *ref)
 {
-	percpu_ref_kill(data);
+	percpu_ref_kill(ref);
 }
 
 static void virtio_fs_cleanup_dax(void *data)
@@ -578,7 +578,7 @@ static int virtio_fs_setup_dax(struct virtio_device *vdev, struct virtio_fs *fs)
 	pgmap = &mi->pgmap;
 	pgmap->altmap_valid = false;
 	pgmap->ref = &mi->ref;
-//	pgmap->kill = virtio_fs_percpu_kill;
+	pgmap->kill = virtio_fs_percpu_kill;
 	pgmap->type = MEMORY_DEVICE_FS_DAX;
 
 	/* Ideally we would directly use the PCI BAR resource but
@@ -595,11 +595,6 @@ static int virtio_fs_setup_dax(struct virtio_device *vdev, struct virtio_fs *fs)
 	fs->window_kaddr = devm_memremap_pages(&vdev->dev, pgmap);
 	if (IS_ERR(fs->window_kaddr))
 		return PTR_ERR(fs->window_kaddr);
-
-	ret = devm_add_action_or_reset(&vdev->dev, virtio_fs_percpu_kill,
-				       &mi->ref);
-	if (ret < 0)
-		return ret;
 
 	fs->window_phys_addr = (phys_addr_t) cache_reg.addr;
 	fs->window_len = (phys_addr_t) cache_reg.len;
